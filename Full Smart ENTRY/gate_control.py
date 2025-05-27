@@ -1,11 +1,6 @@
 """
 Gate Control System
 ==================
-
-A secure and efficient gate control system that uses NFC cards for access control.
-The system includes a GUI interface for monitoring and control, with real-time
-status updates and logging capabilities.
-
 Key Features:
 - NFC card-based access control
 - Real-time gate status monitoring
@@ -19,8 +14,7 @@ Hardware Requirements:
 - Gate control hardware (motors, sensors)
 - LED indicators and buzzer
 
-Author: [Your Team Name]
-Date: [Current Date]
+Commit By: [Khalil Muhammad]
 Version: 1.0
 """
 
