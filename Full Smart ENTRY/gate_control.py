@@ -8,7 +8,7 @@ Raspberry Pi:
 - Handles GUI interface
 - Manages security and access control
 - Reads NFC cards via PN532
-- Communicates with ESP32
+- Communicates with ESP32 via USB
 
 ESP32:
 - Controls gate hardware
@@ -26,12 +26,12 @@ NFC Reader (PN532):
 * VCC -> 3.3V (Pin 1)     # Power supply
 * GND -> GND (Pin 6)      # Ground connection
 
-ESP32 Serial:
-* TX -> GPIO14 (Pin 8)    # To ESP32 RX
-* RX -> GPIO15 (Pin 10)   # From ESP32 TX
-* GND -> GND (Pin 6)      # Common ground
+ESP32 USB Connection:
+* Connect ESP32 to Raspberry Pi using USB cable
+* System will automatically detect the port
+* No additional wiring needed
 
-ESP32 Hardware:
+ESP32 Hardware Connections:
 * Motor Control -> GPIO17 (Pin 11)    # Controls gate movement
 * Gate Sensor -> GPIO27 (Pin 13)      # Detects presence
 * LED Green -> GPIO22 (Pin 15)        # Access granted indicator
@@ -55,10 +55,11 @@ Security Features:
 
 Quick Start Guide:
 ----------------
-1. Connect all hardware components as shown above
-2. Run the program: python3 gate_control.py
-3. Use the control panel to manage access
-4. Present NFC cards to grant access
+1. Connect ESP32 to Raspberry Pi using USB cable
+2. Connect all other hardware components as shown above
+3. Run the program: python3 gate_control.py
+4. Use the control panel to manage access
+5. Present NFC cards to grant access
 
 Need Help?
 ---------
@@ -69,13 +70,13 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 1.3
+Version: 1.4
 """
 
 import time
 import threading
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import board
 import busio
 import adafruit_pn532.i2c as PN532
@@ -87,9 +88,16 @@ import queue
 import weakref
 import json
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple, Set, Any, Union
 import serial
 import serial.tools.list_ports
+import subprocess
+import signal
+import sys
+from dataclasses import dataclass
+from enum import Enum, auto
+import mypy
+import pylint
 
 # Configure logging
 from logging.handlers import RotatingFileHandler
@@ -107,93 +115,383 @@ SERIAL_PORT = '/dev/ttyUSB0'  # Default ESP32 port
 BAUD_RATE = 115200
 SERIAL_TIMEOUT = 1
 
+# USB connection settings
+USB_CHECK_INTERVAL = 5  # Seconds between USB connection checks
+MAX_RECONNECT_ATTEMPTS = 3
+RECONNECT_DELAY = 2  # Seconds between reconnection attempts
+
+# System configuration
+CONFIG_FILE = 'gate_config.json'
+DEFAULT_CONFIG = {
+    'security': {
+        'max_attempts': 3,
+        'lockout_time': 300,
+        'unauthorized_cooldown': 60,
+        'card_cooldown': 5,
+        'auto_close_delay': 10
+    },
+    'hardware': {
+        'baud_rate': 115200,
+        'serial_timeout': 1,
+        'usb_check_interval': 5,
+        'max_reconnect_attempts': 3,
+        'reconnect_delay': 2
+    },
+    'logging': {
+        'max_log_size': 1024 * 1024,  # 1MB
+        'backup_count': 3,
+        'log_level': 'INFO'
+    }
+}
+
+# Define enums for better type safety
+class SecurityLevel(Enum):
+    NORMAL = auto()
+    HIGH = auto()
+    EMERGENCY = auto()
+
+class GateState(Enum):
+    CLOSED = auto()
+    OPENING = auto()
+    OPEN = auto()
+    CLOSING = auto()
+    ERROR = auto()
+
+@dataclass
+class SecurityConfig:
+    max_attempts: int
+    lockout_time: int
+    unauthorized_cooldown: int
+    card_cooldown: int
+    auto_close_delay: int
+
+@dataclass
+class HardwareConfig:
+    baud_rate: int
+    serial_timeout: int
+    usb_check_interval: int
+    max_reconnect_attempts: int
+    reconnect_delay: int
+
+@dataclass
+class LoggingConfig:
+    max_log_size: int
+    backup_count: int
+    log_level: str
+
+class ConfigurationManager:
+    """
+    Manages system configuration and settings.
+    Handles loading, saving, and updating configuration.
+    """
+    
+    def __init__(self) -> None:
+        """
+        Initialize configuration manager.
+        Loads or creates default configuration.
+        """
+        self.config = self.load_config()
+        self.validate_config()
+        
+    def load_config(self) -> Dict[str, Any]:
+        """
+        Load configuration from file or create default.
+        
+        Returns:
+            Dict[str, Any]: The loaded configuration
+        """
+        try:
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, 'r') as f:
+                    config = json.load(f)
+                logging.info("Configuration loaded successfully")
+                return config
+            else:
+                logging.info("No configuration file found, using defaults")
+                return DEFAULT_CONFIG.copy()
+        except Exception as e:
+            logging.error(f"Error loading configuration: {e}")
+            return DEFAULT_CONFIG.copy()
+    
+    def get_security_config(self) -> SecurityConfig:
+        """
+        Get security configuration.
+        
+        Returns:
+            SecurityConfig: Security configuration object
+        """
+        sec_config = self.config['security']
+        return SecurityConfig(
+            max_attempts=sec_config['max_attempts'],
+            lockout_time=sec_config['lockout_time'],
+            unauthorized_cooldown=sec_config['unauthorized_cooldown'],
+            card_cooldown=sec_config['card_cooldown'],
+            auto_close_delay=sec_config['auto_close_delay']
+        )
+    
+    def get_hardware_config(self) -> HardwareConfig:
+        """
+        Get hardware configuration.
+        
+        Returns:
+            HardwareConfig: Hardware configuration object
+        """
+        hw_config = self.config['hardware']
+        return HardwareConfig(
+            baud_rate=hw_config['baud_rate'],
+            serial_timeout=hw_config['serial_timeout'],
+            usb_check_interval=hw_config['usb_check_interval'],
+            max_reconnect_attempts=hw_config['max_reconnect_attempts'],
+            reconnect_delay=hw_config['reconnect_delay']
+        )
+    
+    def get_logging_config(self) -> LoggingConfig:
+        """
+        Get logging configuration.
+        
+        Returns:
+            LoggingConfig: Logging configuration object
+        """
+        log_config = self.config['logging']
+        return LoggingConfig(
+            max_log_size=log_config['max_log_size'],
+            backup_count=log_config['backup_count'],
+            log_level=log_config['log_level']
+        )
+
 class ESP32Controller:
     """
     Manages communication with the ESP32 controller.
     Handles hardware control and status monitoring.
     """
     
-    def __init__(self):
+    def __init__(self, config: HardwareConfig) -> None:
         """
-        Initialize ESP32 communication.
-        Sets up serial connection and command handling.
+        Initialize ESP32 controller with configuration.
+        
+        Args:
+            config (HardwareConfig): Hardware configuration
         """
-        self.serial = None
+        self.config = config
+        self.serial: Optional[serial.Serial] = None
         self.connected = False
-        self.command_queue = queue.Queue()
-        self.status_queue = queue.Queue()
+        self.command_queue: queue.Queue[str] = queue.Queue()
+        self.status_queue: queue.Queue[str] = queue.Queue()
         
         # Security state
-        self.is_locked = True  # Start with gate locked
+        self.is_locked = True
         self.unauthorized_detected = False
+        self.gate_state = GateState.CLOSED
+        
+        # Connection management
+        self.reconnect_attempts = 0
+        self.last_connection_check = 0.0
+        self.port_info: Optional[str] = None
+        self.last_command_time = 0.0
+        self.command_timeout = 5.0  # Seconds
         
         # Start connection attempt
         self.connect_esp32()
         
-        # Start command processing
+        # Start monitoring threads
         self.running = True
-        self.command_thread = threading.Thread(target=self.process_commands)
-        self.command_thread.daemon = True
-        self.command_thread.start()
-        
-        # Start status monitoring
-        self.status_thread = threading.Thread(target=self.monitor_status)
-        self.status_thread.daemon = True
-        self.status_thread.start()
+        self.start_monitoring_threads()
 
-    def connect_esp32(self):
+    def start_monitoring_threads(self):
         """
-        Attempt to connect to the ESP32 controller.
-        Tries multiple ports if the default port fails.
+        Start all monitoring threads.
         """
-        try:
-            # Try default port first
-            self.serial = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=SERIAL_TIMEOUT)
-            self.connected = True
-            logging.info("Connected to ESP32 on default port")
-            return
-        except:
-            logging.warning("Default port connection failed, searching for ESP32...")
+        threads = [
+            (self.process_commands, "Command Processing"),
+            (self.monitor_status, "Status Monitoring"),
+            (self.monitor_connection, "Connection Monitoring"),
+            (self.monitor_hardware, "Hardware Monitoring")
+        ]
         
-        # Search for ESP32 on available ports
-        for port in serial.tools.list_ports.comports():
+        for target, name in threads:
+            thread = threading.Thread(target=target, name=name)
+            thread.daemon = True
+            thread.start()
+            logging.info(f"Started {name} thread")
+
+    def monitor_hardware(self):
+        """
+        Monitor hardware status and health.
+        """
+        while self.running:
             try:
-                self.serial = serial.Serial(port.device, BAUD_RATE, timeout=SERIAL_TIMEOUT)
-                # Test connection with a simple command
-                self.send_command("STATUS")
-                response = self.serial.readline().decode().strip()
-                if response:
-                    self.connected = True
-                    logging.info(f"Connected to ESP32 on {port.device}")
-                    return
-                self.serial.close()
-            except:
-                continue
-        
-        logging.error("Could not connect to ESP32 controller")
-        self.connected = False
+                if self.connected:
+                    # Check motor status
+                    self.send_command("STATUS:MOTOR")
+                    # Check sensor status
+                    self.send_command("STATUS:SENSORS")
+                    # Check power status
+                    self.send_command("STATUS:POWER")
+                time.sleep(5)
+            except Exception as e:
+                logging.error(f"Error in hardware monitoring: {e}")
+                time.sleep(1)
 
-    def send_command(self, command: str) -> bool:
+    def send_command(self, command: str, timeout: Optional[float] = None) -> bool:
         """
-        Send a command to the ESP32 controller.
+        Send a command to the ESP32 controller with timeout.
         
         Args:
             command (str): The command to send
+            timeout (Optional[float]): Command timeout in seconds
             
         Returns:
             bool: True if command was sent successfully
         """
-        if not self.connected:
+        if not isinstance(command, str):
+            raise ValueError("Command must be a string")
+        
+        if timeout is not None and not isinstance(timeout, (int, float)):
+            raise ValueError("Timeout must be a number")
+        
+        if not self.connected or self.serial is None:
             logging.error("Cannot send command: ESP32 not connected")
             return False
-            
+        
         try:
             self.serial.write(f"{command}\n".encode())
+            self.last_command_time = time.time()
+            
+            if timeout:
+                start_time = time.time()
+                while time.time() - start_time < timeout:
+                    if self.serial.in_waiting:
+                        response = self.serial.readline().decode().strip()
+                        if response:
+                            return True
+                    time.sleep(0.1)
+                logging.error(f"Command timeout: {command}")
+                return False
+            
             return True
         except Exception as e:
             logging.error(f"Error sending command to ESP32: {e}")
             self.connected = False
             return False
+
+    def emergency_stop(self):
+        """
+        Perform emergency stop of all hardware.
+        """
+        try:
+            # Stop all motors
+            self.send_command("EMERGENCY:STOP")
+            # Lock the gate
+            self.lock_gate()
+            # Turn off all outputs
+            self.send_command("OUTPUT:OFF")
+            logging.warning("Emergency stop activated")
+        except Exception as e:
+            logging.error(f"Error during emergency stop: {e}")
+
+    def get_esp32_port(self) -> Optional[str]:
+        """
+        Find the ESP32 USB port.
+        
+        Returns:
+            Optional[str]: The port name if found, None otherwise
+        """
+        try:
+            # List all available ports
+            ports = serial.tools.list_ports.comports()
+            
+            # Try to find ESP32 port
+            for port in ports:
+                # Common ESP32 USB identifiers
+                if any(identifier in str(port.description).upper() for identifier in ['CP210', 'CH340', 'SILICON LABS']):
+                    return port.device
+            return None
+        except Exception as e:
+            logging.error(f"Error finding ESP32 port: {e}")
+            return None
+
+    def check_usb_permissions(self) -> bool:
+        """
+        Check and fix USB permissions if needed.
+        
+        Returns:
+            bool: True if permissions are correct
+        """
+        try:
+            # Check if user is in dialout group
+            result = subprocess.run(['groups'], capture_output=True, text=True)
+            if 'dialout' not in result.stdout:
+                logging.warning("User not in dialout group. Attempting to fix permissions...")
+                subprocess.run(['sudo', 'usermod', '-a', '-G', 'dialout', os.getenv('USER')])
+                logging.info("Please log out and back in for changes to take effect")
+                return False
+            return True
+        except Exception as e:
+            logging.error(f"Error checking USB permissions: {e}")
+            return False
+
+    def connect_esp32(self):
+        """
+        Attempt to connect to the ESP32 controller via USB.
+        Automatically detects the correct port.
+        """
+        if not self.check_usb_permissions():
+            return
+
+        try:
+            esp32_port = self.get_esp32_port()
+            if esp32_port:
+                self.serial = serial.Serial(esp32_port, self.config.baud_rate, timeout=self.config.serial_timeout)
+                # Test connection
+                self.send_command("STATUS")
+                response = self.serial.readline().decode().strip()
+                if response:
+                    self.connected = True
+                    self.port_info = esp32_port
+                    self.reconnect_attempts = 0
+                    logging.info(f"Connected to ESP32 on {esp32_port}")
+                    return
+            
+            logging.error("Could not find ESP32 device")
+            self.connected = False
+            
+        except Exception as e:
+            logging.error(f"Error connecting to ESP32: {e}")
+            self.connected = False
+
+    def monitor_connection(self):
+        """
+        Monitor USB connection status and handle reconnection.
+        """
+        while self.running:
+            try:
+                current_time = time.time()
+                if current_time - self.last_connection_check >= self.config.usb_check_interval:
+                    self.last_connection_check = current_time
+                    
+                    if not self.connected:
+                        if self.reconnect_attempts < self.config.max_reconnect_attempts:
+                            logging.info(f"Attempting to reconnect to ESP32 (Attempt {self.reconnect_attempts + 1}/{self.config.max_reconnect_attempts})")
+                            self.connect_esp32()
+                            self.reconnect_attempts += 1
+                        else:
+                            logging.error("Max reconnection attempts reached. Please check USB connection.")
+                    else:
+                        # Verify connection is still active
+                        try:
+                            self.send_command("PING")
+                            response = self.serial.readline().decode().strip()
+                            if not response:
+                                raise Exception("No response from ESP32")
+                        except:
+                            logging.warning("Lost connection to ESP32")
+                            self.connected = False
+                            self.reconnect_attempts = 0
+                
+                time.sleep(1)
+            except Exception as e:
+                logging.error(f"Error in connection monitoring: {e}")
+                time.sleep(1)
 
     def process_commands(self):
         """
@@ -231,11 +529,17 @@ class ESP32Controller:
 
     def cleanup(self):
         """
-        Clean up ESP32 connection.
+        Clean up ESP32 connection and resources.
         """
         self.running = False
         if self.serial and self.serial.is_open:
-            self.serial.close()
+            try:
+                # Ensure gate is locked before closing
+                self.lock_gate()
+                time.sleep(0.5)  # Wait for lock to engage
+                self.serial.close()
+            except Exception as e:
+                logging.error(f"Error during cleanup: {e}")
         logging.info("ESP32 connection closed")
 
     def lock_gate(self):
@@ -279,153 +583,123 @@ class SecurityManager:
     Keeps track of authorized cards and access attempts.
     """
     
-    def __init__(self):
+    def __init__(self, config: SecurityConfig) -> None:
         """
-        Setting up the security system.
-        Initializes storage for authorized cards and access tracking.
+        Initialize security manager with configuration.
+        
+        Args:
+            config (SecurityConfig): Security configuration
         """
-        # Storage for authorized cards
-        self.authorized_cards: Dict[str, Dict] = {}
-        
-        # Access attempt tracking
-        self.access_log: List[Dict] = []
-        
-        # Security settings
-        self.max_attempts = 3  # Maximum failed attempts before warning
-        self.lockout_time = 300  # 5-minute cooldown after max attempts
-        
-        # Access attempt tracking
+        self.config = config
+        self.authorized_cards: Dict[str, Dict[str, Any]] = {}
+        self.access_log: List[Dict[str, Any]] = []
         self.failed_attempts: Dict[str, int] = {}
         self.lockout_until: Dict[str, float] = {}
-        
-        # Unauthorized access tracking
         self.unauthorized_access_count = 0
-        self.last_unauthorized_time = 0
-        self.unauthorized_cooldown = 60  # Seconds between unauthorized events
+        self.last_unauthorized_time = 0.0
+        self.suspicious_ips: Set[str] = set()
+        self.blocked_cards: Set[str] = set()
+        self.security_level = SecurityLevel.NORMAL
         
-        # Load existing authorized cards
+        # Load existing data
         self.load_authorized_cards()
+        self.load_security_data()
         logging.info("Security system initialized and ready!")
 
-    def load_authorized_cards(self):
+    def load_security_data(self):
         """
-        Loads the list of authorized cards from storage.
-        Creates the storage file if it doesn't exist.
-        """
-        try:
-            if os.path.exists('authorized_cards.json'):
-                with open('authorized_cards.json', 'r') as f:
-                    self.authorized_cards = json.load(f)
-                logging.info(f"Loaded {len(self.authorized_cards)} authorized cards")
-        except Exception as e:
-            logging.error(f"Unable to load authorized cards: {e}")
-
-    def save_authorized_cards(self):
-        """
-        Saves the current list of authorized cards to storage.
-        Ensures access permissions are preserved between restarts.
+        Load security-related data from storage.
         """
         try:
-            with open('authorized_cards.json', 'w') as f:
-                json.dump(self.authorized_cards, f, indent=4)
-            logging.info("Authorized cards saved successfully")
+            if os.path.exists('security_data.json'):
+                with open('security_data.json', 'r') as f:
+                    data = json.load(f)
+                    self.suspicious_ips = set(data.get('suspicious_ips', []))
+                    self.blocked_cards = set(data.get('blocked_cards', []))
         except Exception as e:
-            logging.error(f"Unable to save authorized cards: {e}")
+            logging.error(f"Error loading security data: {e}")
 
-    def add_card(self, card_id: str):
+    def save_security_data(self):
         """
-        Adds a new card to the authorized list.
+        Save security-related data to storage.
+        """
+        try:
+            data = {
+                'suspicious_ips': list(self.suspicious_ips),
+                'blocked_cards': list(self.blocked_cards)
+            }
+            with open('security_data.json', 'w') as f:
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            logging.error(f"Error saving security data: {e}")
+
+    def check_access(self, card_id: str, ip_address: Optional[str] = None) -> Tuple[bool, str]:
+        """
+        Verify if access should be granted.
         
         Args:
-            card_id (str): The unique identifier of the NFC card
-        """
-        self.authorized_cards[card_id] = {
-            "added_date": datetime.now().isoformat()
-        }
-        self.save_authorized_cards()
-        logging.info(f"Added new authorized card: {card_id}")
-
-    def remove_card(self, card_id: str):
-        """
-        Removes a card from the authorized list.
-        
-        Args:
-            card_id (str): The card to remove from authorized access
-        """
-        if card_id in self.authorized_cards:
-            del self.authorized_cards[card_id]
-            self.save_authorized_cards()
-            logging.info(f"Removed card {card_id} from authorized list")
-
-    def check_access(self, card_id: str) -> bool:
-        """
-        Verifies if a card is authorized for access.
-        Implements security measures including attempt limits.
-        
-        Args:
-            card_id (str): The card to check for access
+            card_id (str): The card ID to check
+            ip_address (Optional[str]): The IP address of the request
             
         Returns:
-            bool: True if access is granted, False if denied
+            Tuple[bool, str]: (access_granted, reason)
         """
+        if not isinstance(card_id, str):
+            raise ValueError("Card ID must be a string")
+        
+        if ip_address is not None and not isinstance(ip_address, str):
+            raise ValueError("IP address must be a string")
+        
         current_time = time.time()
+        
+        # Check security level
+        if self.security_level == SecurityLevel.EMERGENCY:
+            return False, "System in emergency mode"
+        
+        # Check if card is blocked
+        if card_id in self.blocked_cards:
+            return False, "Card is blocked"
         
         # Check for active lockout
         if card_id in self.lockout_until:
             if current_time < self.lockout_until[card_id]:
-                logging.warning(f"Card {card_id} is currently locked out")
-                return False
+                return False, "Card is locked out"
             else:
-                # Reset lockout status
                 del self.lockout_until[card_id]
                 self.failed_attempts[card_id] = 0
-                logging.info(f"Lockout period ended for card {card_id}")
-
+        
+        # Check IP address
+        if ip_address and ip_address in self.suspicious_ips:
+            return False, "Suspicious IP address"
+        
         # Verify card authorization
         if card_id in self.authorized_cards:
             self.failed_attempts[card_id] = 0
-            logging.info(f"Access granted for card {card_id}")
-            return True
+            return True, "Access granted"
         
         # Handle unauthorized access attempt
         self.failed_attempts[card_id] = self.failed_attempts.get(card_id, 0) + 1
-        if self.failed_attempts[card_id] >= self.max_attempts:
-            self.lockout_until[card_id] = current_time + self.lockout_time
-            logging.warning(f"Card {card_id} locked out due to multiple failed attempts")
+        if self.failed_attempts[card_id] >= self.config.max_attempts:
+            self.lockout_until[card_id] = current_time + self.config.lockout_time
+            if ip_address:
+                self.suspicious_ips.add(ip_address)
+            self.save_security_data()
+            return False, "Too many failed attempts"
         
-        return False
+        return False, "Unauthorized card"
 
-    def log_access(self, card_id: str, success: bool):
+    def log_unauthorized_access(self, details: Dict = None) -> bool:
         """
-        Records access attempts in the system log.
+        Log unauthorized access attempt with details.
         
         Args:
-            card_id (str): The card used in the attempt
-            success (bool): Whether access was granted
-        """
-        log_entry = {
-            "timestamp": datetime.now().isoformat(),
-            "card_id": card_id,
-            "success": success
-        }
-        self.access_log.append(log_entry)
-        
-        # Maintain log size
-        if len(self.access_log) > 1000:
-            self.access_log = self.access_log[-1000:]
-        
-        if success:
-            logging.info(f"Access granted for card {card_id}")
-        else:
-            logging.info(f"Access denied for card {card_id}")
-
-    def log_unauthorized_access(self):
-        """
-        Logs an unauthorized access attempt.
-        Triggers security measures if necessary.
+            details (Dict): Additional details about the attempt
+            
+        Returns:
+            bool: True if security measures should be triggered
         """
         current_time = time.time()
-        if current_time - self.last_unauthorized_time > self.unauthorized_cooldown:
+        if current_time - self.last_unauthorized_time > self.config.unauthorized_cooldown:
             self.unauthorized_access_count += 1
             self.last_unauthorized_time = current_time
             
@@ -434,11 +708,12 @@ class SecurityManager:
                 "type": "unauthorized_access",
                 "count": self.unauthorized_access_count
             }
-            self.access_log.append(log_entry)
+            if details:
+                log_entry.update(details)
             
+            self.access_log.append(log_entry)
             logging.warning(f"Unauthorized access detected! Count: {self.unauthorized_access_count}")
             
-            # Trigger security measures
             return True
         return False
 
@@ -700,16 +975,21 @@ class GateControlSystem:
     Coordinates between NFC reader and ESP32 controller.
     """
     
-    def __init__(self):
+    def __init__(self) -> None:
         """
         Initialize the gate control system.
         Sets up NFC reader and ESP32 controller.
         """
+        # Load configuration
+        config_manager = ConfigurationManager()
+        security_config = config_manager.get_security_config()
+        hardware_config = config_manager.get_hardware_config()
+        
         # Initialize security manager
-        self.security_manager = SecurityManager()
+        self.security_manager = SecurityManager(security_config)
         
         # Initialize ESP32 controller
-        self.esp32 = ESP32Controller()
+        self.esp32 = ESP32Controller(hardware_config)
         
         # Initialize NFC reader
         i2c = busio.I2C(board.SCL, board.SDA, frequency=100000)
@@ -719,9 +999,9 @@ class GateControlSystem:
         # Initialize system state
         self.is_gate_open = False
         self.is_occupied = False
-        self.last_card_time = 0
-        self.card_cooldown = 5  # Seconds between card reads
-        self.last_card_id = None
+        self.last_card_time = 0.0
+        self.card_cooldown = security_config.card_cooldown
+        self.last_card_id: Optional[str] = None
         
         # Ensure gate is locked on startup
         self.esp32.lock_gate()
@@ -785,7 +1065,7 @@ class GateControlSystem:
                 time.sleep(0.5)  # Wait for gate to close
                 self.esp32.lock_gate()
 
-    def handle_card(self, card_id: str):
+    def handle_card(self, card_id: str) -> None:
         """
         Handle an NFC card read.
         Processes the card and controls the gate accordingly.
@@ -793,6 +1073,9 @@ class GateControlSystem:
         Args:
             card_id (str): The ID of the detected card
         """
+        if not isinstance(card_id, str):
+            raise ValueError("Card ID must be a string")
+        
         current_time = time.time()
         if current_time - self.last_card_time < self.card_cooldown:
             return
@@ -801,7 +1084,8 @@ class GateControlSystem:
         self.last_card_id = card_id
         
         # Check card authorization
-        if self.security_manager.check_access(card_id):
+        access_granted, reason = self.security_manager.check_access(card_id)
+        if access_granted:
             self.security_manager.log_access(card_id, True)
             if not self.is_gate_open:
                 self.open_gate()
@@ -809,8 +1093,9 @@ class GateControlSystem:
                 self.close_gate()
         else:
             self.security_manager.log_access(card_id, False)
-            self.send_command("LED:RED")
-            self.send_command("BUZZER:RED")
+            self.esp32.send_command("LED:RED")
+            self.esp32.send_command("BUZZER:RED")
+            logging.warning(f"Access denied: {reason}")
 
     def handle_unauthorized_access(self):
         """
@@ -860,8 +1145,17 @@ class GateControlSystem:
         """
         Clean up system resources.
         """
-        self.esp32.cleanup()
-        logging.info("System cleanup completed")
+        try:
+            # Close gate and lock it
+            if self.is_gate_open:
+                self.close_gate()
+            
+            # Clean up ESP32 connection
+            self.esp32.cleanup()
+            
+            logging.info("System cleanup completed")
+        except Exception as e:
+            logging.error(f"Error during system cleanup: {e}")
 
 if __name__ == "__main__":
     try:
