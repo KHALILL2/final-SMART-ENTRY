@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 1.6
+Version: 1.7
 """
 
 import time
@@ -658,10 +658,16 @@ class SecurityManager:
         self.blocked_cards: Set[str] = set()
         self.security_level = SecurityLevel.NORMAL
         
-        # Load existing data
+        # Initialize data storage
+        self._initialize_storage()
+        logging.info("Security system initialized and ready!")
+
+    def _initialize_storage(self) -> None:
+        """
+        Initialize all storage systems.
+        """
         self.load_authorized_cards()
         self.load_security_data()
-        logging.info("Security system initialized and ready!")
 
     def load_authorized_cards(self) -> None:
         """
@@ -699,6 +705,44 @@ class SecurityManager:
             logging.info("Authorized cards saved successfully")
         except Exception as e:
             logging.error(f"Error saving authorized cards: {e}")
+
+    def load_security_data(self) -> None:
+        """
+        Load security-related data from storage.
+        """
+        try:
+            if os.path.exists('security_data.json'):
+                with open('security_data.json', 'r') as f:
+                    data = json.load(f)
+                    self.suspicious_ips = set(data.get('suspicious_ips', []))
+                    self.blocked_cards = set(data.get('blocked_cards', []))
+                logging.info("Security data loaded successfully")
+            else:
+                # Initialize with empty sets
+                self.suspicious_ips = set()
+                self.blocked_cards = set()
+                self.save_security_data()
+                logging.info("Created new security data file")
+        except Exception as e:
+            logging.error(f"Error loading security data: {e}")
+            # Initialize with empty sets if loading fails
+            self.suspicious_ips = set()
+            self.blocked_cards = set()
+
+    def save_security_data(self) -> None:
+        """
+        Save security-related data to storage.
+        """
+        try:
+            data = {
+                'suspicious_ips': list(self.suspicious_ips),
+                'blocked_cards': list(self.blocked_cards)
+            }
+            with open('security_data.json', 'w') as f:
+                json.dump(data, f, indent=4)
+            logging.info("Security data saved successfully")
+        except Exception as e:
+            logging.error(f"Error saving security data: {e}")
 
     def add_authorized_card(self, card_id: str, description: str = "", access_level: str = "user") -> bool:
         """
@@ -777,33 +821,6 @@ class SecurityManager:
         except Exception as e:
             logging.error(f"Error logging access: {e}")
 
-    def load_security_data(self):
-        """
-        Load security-related data from storage.
-        """
-        try:
-            if os.path.exists('security_data.json'):
-                with open('security_data.json', 'r') as f:
-                    data = json.load(f)
-                    self.suspicious_ips = set(data.get('suspicious_ips', []))
-                    self.blocked_cards = set(data.get('blocked_cards', []))
-        except Exception as e:
-            logging.error(f"Error loading security data: {e}")
-
-    def save_security_data(self):
-        """
-        Save security-related data to storage.
-        """
-        try:
-            data = {
-                'suspicious_ips': list(self.suspicious_ips),
-                'blocked_cards': list(self.blocked_cards)
-            }
-            with open('security_data.json', 'w') as f:
-                json.dump(data, f, indent=4)
-        except Exception as e:
-            logging.error(f"Error saving security data: {e}")
-
     def check_access(self, card_id: str, ip_address: Optional[str] = None) -> Tuple[bool, str]:
         """
         Verify if access should be granted.
@@ -861,7 +878,7 @@ class SecurityManager:
 
     def log_unauthorized_access(self) -> bool:
         """
-        Log unauthorized access attempt with details.
+        Log unauthorized access attempt.
         
         Returns:
             bool: True if security measures should be triggered
