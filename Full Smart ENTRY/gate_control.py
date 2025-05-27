@@ -14,6 +14,8 @@ ESP32:
 - Controls gate hardware
 - Manages sensors and indicators
 - Reports status to Raspberry Pi
+- Handles unauthorized access detection
+- Controls solenoid lock mechanism
 
 Hardware Connections:
 -------------------
@@ -35,6 +37,21 @@ ESP32 Hardware:
 * LED Green -> GPIO22 (Pin 15)        # Access granted indicator
 * LED Red -> GPIO23 (Pin 16)          # Access denied indicator
 * Buzzer -> GPIO24 (Pin 18)           # Audio feedback
+* IR Sensor -> GPIO25 (Pin 22)        # Detects unauthorized access
+* Solenoid Lock -> GPIO26 (Pin 37)    # Locks gate mechanism
+
+Security Features:
+----------------
+1. NFC Card Authentication
+2. IR Sensor Detection
+   - Detects unauthorized access attempts
+   - Triggers alarm if someone passes without card
+3. Solenoid Lock
+   - Automatically locks gate mechanism
+   - Only unlocks with valid card access
+4. Access Logging
+   - Records all access attempts
+   - Tracks unauthorized access events
 
 Quick Start Guide:
 ----------------
@@ -47,11 +64,12 @@ Need Help?
 ---------
 - Green light + short beep = Access granted
 - Red light + long beep = Access denied
+- Continuous alarm = Unauthorized access detected
 - Emergency stop button is always available
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 1.2
+Version: 1.3
 """
 
 import time
@@ -104,6 +122,10 @@ class ESP32Controller:
         self.connected = False
         self.command_queue = queue.Queue()
         self.status_queue = queue.Queue()
+        
+        # Security state
+        self.is_locked = True  # Start with gate locked
+        self.unauthorized_detected = False
         
         # Start connection attempt
         self.connect_esp32()
@@ -216,6 +238,41 @@ class ESP32Controller:
             self.serial.close()
         logging.info("ESP32 connection closed")
 
+    def lock_gate(self):
+        """
+        Activates the solenoid lock to secure the gate.
+        """
+        if not self.is_locked:
+            self.send_command("LOCK:ACTIVATE")
+            self.is_locked = True
+            logging.info("Gate mechanism locked")
+
+    def unlock_gate(self):
+        """
+        Deactivates the solenoid lock to allow gate movement.
+        """
+        if self.is_locked:
+            self.send_command("LOCK:DEACTIVATE")
+            self.is_locked = False
+            logging.info("Gate mechanism unlocked")
+
+    def trigger_unauthorized_alarm(self):
+        """
+        Triggers the alarm for unauthorized access.
+        """
+        self.unauthorized_detected = True
+        self.send_command("ALARM:UNAUTHORIZED")
+        logging.warning("Unauthorized access alarm triggered")
+
+    def stop_unauthorized_alarm(self):
+        """
+        Stops the unauthorized access alarm.
+        """
+        if self.unauthorized_detected:
+            self.send_command("ALARM:STOP")
+            self.unauthorized_detected = False
+            logging.info("Unauthorized access alarm stopped")
+
 class SecurityManager:
     """
     Manages access control and security features.
@@ -240,6 +297,11 @@ class SecurityManager:
         # Access attempt tracking
         self.failed_attempts: Dict[str, int] = {}
         self.lockout_until: Dict[str, float] = {}
+        
+        # Unauthorized access tracking
+        self.unauthorized_access_count = 0
+        self.last_unauthorized_time = 0
+        self.unauthorized_cooldown = 60  # Seconds between unauthorized events
         
         # Load existing authorized cards
         self.load_authorized_cards()
@@ -356,6 +418,29 @@ class SecurityManager:
             logging.info(f"Access granted for card {card_id}")
         else:
             logging.info(f"Access denied for card {card_id}")
+
+    def log_unauthorized_access(self):
+        """
+        Logs an unauthorized access attempt.
+        Triggers security measures if necessary.
+        """
+        current_time = time.time()
+        if current_time - self.last_unauthorized_time > self.unauthorized_cooldown:
+            self.unauthorized_access_count += 1
+            self.last_unauthorized_time = current_time
+            
+            log_entry = {
+                "timestamp": datetime.now().isoformat(),
+                "type": "unauthorized_access",
+                "count": self.unauthorized_access_count
+            }
+            self.access_log.append(log_entry)
+            
+            logging.warning(f"Unauthorized access detected! Count: {self.unauthorized_access_count}")
+            
+            # Trigger security measures
+            return True
+        return False
 
 class GateControlGUI:
     """
@@ -638,6 +723,9 @@ class GateControlSystem:
         self.card_cooldown = 5  # Seconds between card reads
         self.last_card_id = None
         
+        # Ensure gate is locked on startup
+        self.esp32.lock_gate()
+        
         logging.info("Gate control system initialized")
 
     def send_command(self, command: str) -> bool:
@@ -671,9 +759,14 @@ class GateControlSystem:
     def open_gate(self):
         """
         Open the gate via ESP32 controller.
+        Includes unlocking mechanism.
         """
         if not self.is_gate_open:
             logging.info("Opening gate")
+            # Unlock the gate mechanism first
+            self.esp32.unlock_gate()
+            time.sleep(0.5)  # Wait for lock to disengage
+            
             if self.send_command("GATE:OPEN"):
                 self.is_gate_open = True
                 self.send_command("LED:GREEN")
@@ -682,11 +775,15 @@ class GateControlSystem:
     def close_gate(self):
         """
         Close the gate via ESP32 controller.
+        Includes locking mechanism.
         """
         if self.is_gate_open:
             logging.info("Closing gate")
             if self.send_command("GATE:CLOSE"):
                 self.is_gate_open = False
+                # Lock the gate mechanism after closing
+                time.sleep(0.5)  # Wait for gate to close
+                self.esp32.lock_gate()
 
     def handle_card(self, card_id: str):
         """
@@ -715,6 +812,17 @@ class GateControlSystem:
             self.send_command("LED:RED")
             self.send_command("BUZZER:RED")
 
+    def handle_unauthorized_access(self):
+        """
+        Handle unauthorized access detection.
+        Triggers security measures and logging.
+        """
+        if self.security_manager.log_unauthorized_access():
+            self.esp32.trigger_unauthorized_alarm()
+            # Lock the gate if it's open
+            if self.is_gate_open:
+                self.close_gate()
+
     def run(self):
         """
         Main system loop.
@@ -732,6 +840,8 @@ class GateControlSystem:
                         self.is_occupied = False
                         if self.is_gate_open:
                             self.close_gate()
+                    elif "UNAUTHORIZED" in status:
+                        self.handle_unauthorized_access()
                 except queue.Empty:
                     pass
 
