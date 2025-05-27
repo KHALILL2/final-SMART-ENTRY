@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 1.4
+Version: 1.5
 """
 
 import time
@@ -212,6 +212,63 @@ class ConfigurationManager:
         except Exception as e:
             logging.error(f"Error loading configuration: {e}")
             return DEFAULT_CONFIG.copy()
+    
+    def save_config(self) -> None:
+        """
+        Save current configuration to file.
+        """
+        try:
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(self.config, f, indent=4)
+            logging.info("Configuration saved successfully")
+        except Exception as e:
+            logging.error(f"Error saving configuration: {e}")
+    
+    def validate_config(self) -> None:
+        """
+        Validate configuration values and fix if necessary.
+        """
+        # Ensure all required sections exist
+        for section in DEFAULT_CONFIG:
+            if section not in self.config:
+                self.config[section] = DEFAULT_CONFIG[section]
+                logging.warning(f"Missing config section: {section}, using defaults")
+        
+        # Validate and fix values
+        for section, values in DEFAULT_CONFIG.items():
+            for key, default_value in values.items():
+                if key not in self.config[section]:
+                    self.config[section][key] = default_value
+                    logging.warning(f"Missing config value: {section}.{key}, using default")
+        
+        # Validate data types
+        try:
+            # Security section
+            self.config['security']['max_attempts'] = int(self.config['security']['max_attempts'])
+            self.config['security']['lockout_time'] = int(self.config['security']['lockout_time'])
+            self.config['security']['unauthorized_cooldown'] = int(self.config['security']['unauthorized_cooldown'])
+            self.config['security']['card_cooldown'] = int(self.config['security']['card_cooldown'])
+            self.config['security']['auto_close_delay'] = int(self.config['security']['auto_close_delay'])
+            
+            # Hardware section
+            self.config['hardware']['baud_rate'] = int(self.config['hardware']['baud_rate'])
+            self.config['hardware']['serial_timeout'] = int(self.config['hardware']['serial_timeout'])
+            self.config['hardware']['usb_check_interval'] = int(self.config['hardware']['usb_check_interval'])
+            self.config['hardware']['max_reconnect_attempts'] = int(self.config['hardware']['max_reconnect_attempts'])
+            self.config['hardware']['reconnect_delay'] = int(self.config['hardware']['reconnect_delay'])
+            
+            # Logging section
+            self.config['logging']['max_log_size'] = int(self.config['logging']['max_log_size'])
+            self.config['logging']['backup_count'] = int(self.config['logging']['backup_count'])
+            self.config['logging']['log_level'] = str(self.config['logging']['log_level'])
+            
+        except (ValueError, TypeError) as e:
+            logging.error(f"Invalid configuration value type: {e}")
+            # Reset to defaults if validation fails
+            self.config = DEFAULT_CONFIG.copy()
+        
+        # Save validated configuration
+        self.save_config()
     
     def get_security_config(self) -> SecurityConfig:
         """
