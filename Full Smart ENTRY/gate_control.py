@@ -1,23 +1,35 @@
 """
-Gate Control System for Raspberry Pi
-===================================
-What's Inside:
--------------
-- Control panel
-- NFC card reading for secure access
-- Real-time status updates
-- Smart gate closing when the area is clear
-- Helpful lights and sounds to guide users
+Gate Control System for Raspberry Pi with ESP32
+=============================================
+
+System Architecture:
+------------------
+Raspberry Pi:
+- Handles GUI interface
+- Manages security and access control
+- Reads NFC cards via PN532
+- Communicates with ESP32
+
+ESP32:
+- Controls gate hardware
+- Manages sensors and indicators
+- Reports status to Raspberry Pi
 
 Hardware Connections:
 -------------------
+Raspberry Pi:
 NFC Reader (PN532):
 * SDA -> GPIO2 (Pin 3)    # Data connection
 * SCL -> GPIO3 (Pin 5)    # Clock signal
 * VCC -> 3.3V (Pin 1)     # Power supply
 * GND -> GND (Pin 6)      # Ground connection
 
-Gate Control:
+ESP32 Serial:
+* TX -> GPIO14 (Pin 8)    # To ESP32 RX
+* RX -> GPIO15 (Pin 10)   # From ESP32 TX
+* GND -> GND (Pin 6)      # Common ground
+
+ESP32 Hardware:
 * Motor Control -> GPIO17 (Pin 11)    # Controls gate movement
 * Gate Sensor -> GPIO27 (Pin 13)      # Detects presence
 * LED Green -> GPIO22 (Pin 15)        # Access granted indicator
@@ -39,7 +51,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 1.1
+Version: 1.2
 """
 
 import time
@@ -58,9 +70,10 @@ import weakref
 import json
 import os
 from typing import Dict, List, Optional
-import RPi.GPIO as GPIO
+import serial
+import serial.tools.list_ports
 
-# Set up logging to keep track of what's happening
+# Configure logging
 from logging.handlers import RotatingFileHandler
 logging.basicConfig(
     level=logging.INFO,
@@ -71,12 +84,137 @@ logging.basicConfig(
     ]
 )
 
-# Pin numbers for our hardware
-MOTOR_PIN = 17      # Controls the gate motor
-SENSOR_PIN = 27     # Detects if someone's there
-LED_GREEN = 22      # Shows when access is granted
-LED_RED = 23        # Shows when access is denied
-BUZZER_PIN = 24     # Makes friendly beeps
+# Serial communication settings
+SERIAL_PORT = '/dev/ttyUSB0'  # Default ESP32 port
+BAUD_RATE = 115200
+SERIAL_TIMEOUT = 1
+
+class ESP32Controller:
+    """
+    Manages communication with the ESP32 controller.
+    Handles hardware control and status monitoring.
+    """
+    
+    def __init__(self):
+        """
+        Initialize ESP32 communication.
+        Sets up serial connection and command handling.
+        """
+        self.serial = None
+        self.connected = False
+        self.command_queue = queue.Queue()
+        self.status_queue = queue.Queue()
+        
+        # Start connection attempt
+        self.connect_esp32()
+        
+        # Start command processing
+        self.running = True
+        self.command_thread = threading.Thread(target=self.process_commands)
+        self.command_thread.daemon = True
+        self.command_thread.start()
+        
+        # Start status monitoring
+        self.status_thread = threading.Thread(target=self.monitor_status)
+        self.status_thread.daemon = True
+        self.status_thread.start()
+
+    def connect_esp32(self):
+        """
+        Attempt to connect to the ESP32 controller.
+        Tries multiple ports if the default port fails.
+        """
+        try:
+            # Try default port first
+            self.serial = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=SERIAL_TIMEOUT)
+            self.connected = True
+            logging.info("Connected to ESP32 on default port")
+            return
+        except:
+            logging.warning("Default port connection failed, searching for ESP32...")
+        
+        # Search for ESP32 on available ports
+        for port in serial.tools.list_ports.comports():
+            try:
+                self.serial = serial.Serial(port.device, BAUD_RATE, timeout=SERIAL_TIMEOUT)
+                # Test connection with a simple command
+                self.send_command("STATUS")
+                response = self.serial.readline().decode().strip()
+                if response:
+                    self.connected = True
+                    logging.info(f"Connected to ESP32 on {port.device}")
+                    return
+                self.serial.close()
+            except:
+                continue
+        
+        logging.error("Could not connect to ESP32 controller")
+        self.connected = False
+
+    def send_command(self, command: str) -> bool:
+        """
+        Send a command to the ESP32 controller.
+        
+        Args:
+            command (str): The command to send
+            
+        Returns:
+            bool: True if command was sent successfully
+        """
+        if not self.connected:
+            logging.error("Cannot send command: ESP32 not connected")
+            return False
+            
+        try:
+            self.serial.write(f"{command}\n".encode())
+            return True
+        except Exception as e:
+            logging.error(f"Error sending command to ESP32: {e}")
+            self.connected = False
+            return False
+
+    def process_commands(self):
+        """
+        Process commands from the command queue.
+        Sends them to the ESP32 controller.
+        """
+        while self.running:
+            try:
+                command = self.command_queue.get(timeout=0.1)
+                if command:
+                    self.send_command(command)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logging.error(f"Error processing command: {e}")
+
+    def monitor_status(self):
+        """
+        Monitor status updates from the ESP32.
+        Updates system state based on ESP32 reports.
+        """
+        while self.running:
+            if not self.connected:
+                time.sleep(1)
+                continue
+                
+            try:
+                if self.serial.in_waiting:
+                    status = self.serial.readline().decode().strip()
+                    self.status_queue.put(status)
+            except Exception as e:
+                logging.error(f"Error reading ESP32 status: {e}")
+                self.connected = False
+            time.sleep(0.1)
+
+    def cleanup(self):
+        """
+        Clean up ESP32 connection.
+        """
+        self.running = False
+        if self.serial and self.serial.is_open:
+            self.serial.close()
+        logging.info("ESP32 connection closed")
 
 class SecurityManager:
     """
@@ -473,123 +611,53 @@ class GateControlGUI:
 
 class GateControlSystem:
     """
-    This is our main gate control system that handles all the hardware stuff.
-    It talks to the NFC reader, controls the gate, and makes sure everything works smoothly!
+    Main gate control system class.
+    Coordinates between NFC reader and ESP32 controller.
     """
     
     def __init__(self):
         """
-        Let's get everything set up and ready to go!
-        We'll connect to all our hardware and make sure it's working.
+        Initialize the gate control system.
+        Sets up NFC reader and ESP32 controller.
         """
-        # Set up our security system
+        # Initialize security manager
         self.security_manager = SecurityManager()
         
-        # Get our GPIO pins ready
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setwarnings(False)
+        # Initialize ESP32 controller
+        self.esp32 = ESP32Controller()
         
-        # Connect to all our hardware
-        GPIO.setup(MOTOR_PIN, GPIO.OUT)
-        GPIO.setup(SENSOR_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.setup(LED_GREEN, GPIO.OUT)
-        GPIO.setup(LED_RED, GPIO.OUT)
-        GPIO.setup(BUZZER_PIN, GPIO.OUT)
-        
-        # Set up our motor control
-        self.motor_pwm = GPIO.PWM(MOTOR_PIN, 50)  # 50Hz for smooth movement
-        self.motor_pwm.start(0)
-        
-        # Set up our buzzer
-        self.buzzer_pwm = GPIO.PWM(BUZZER_PIN, 440)  # Nice A4 note
-        self.buzzer_pwm.start(0)
-        
-        # Connect to our NFC reader
+        # Initialize NFC reader
         i2c = busio.I2C(board.SCL, board.SDA, frequency=100000)
         self.pn532 = PN532.PN532_I2C(i2c, debug=False)
         self.pn532.SAM_configuration()
         
-        # Set up our system state
+        # Initialize system state
         self.is_gate_open = False
         self.is_occupied = False
         self.last_card_time = 0
-        self.card_cooldown = 5  # Wait 5 seconds between card reads
+        self.card_cooldown = 5  # Seconds between card reads
         self.last_card_id = None
         
-        # Set up our command system
-        self.command_queue = queue.Queue()
-        
-        # Start watching the gate
-        self.running = True
-        self.monitor_thread = threading.Thread(target=self.monitor_gate_status)
-        self.monitor_thread.daemon = True
-        self.monitor_thread.start()
-        
-        logging.info("Gate control system is ready to go! 🚀")
+        logging.info("Gate control system initialized")
 
-    def send_command(self, command):
+    def send_command(self, command: str) -> bool:
         """
-        Send commands to our hardware to make things happen!
+        Send a command to the ESP32 controller.
         
         Args:
-            command (str): What we want to do
+            command (str): The command to send
             
         Returns:
-            bool: True if it worked, False if something went wrong
+            bool: True if command was sent successfully
         """
-        try:
-            if command == "GATE:OPEN":
-                self.motor_pwm.ChangeDutyCycle(90)  # Open the gate smoothly
-                time.sleep(2)  # Wait for it to open
-                self.motor_pwm.ChangeDutyCycle(0)  # Stop the motor
-                self.is_gate_open = True
-                logging.info("Gate opened successfully! 🚪")
-                return True
-                
-            elif command == "GATE:CLOSE":
-                self.motor_pwm.ChangeDutyCycle(10)  # Close the gate gently
-                time.sleep(2)  # Wait for it to close
-                self.motor_pwm.ChangeDutyCycle(0)  # Stop the motor
-                self.is_gate_open = False
-                logging.info("Gate closed successfully! 🔒")
-                return True
-                
-            elif command == "LED:GREEN":
-                GPIO.output(LED_GREEN, GPIO.HIGH)  # Turn on the happy light
-                GPIO.output(LED_RED, GPIO.LOW)
-                return True
-                
-            elif command == "LED:RED":
-                GPIO.output(LED_GREEN, GPIO.LOW)
-                GPIO.output(LED_RED, GPIO.HIGH)  # Turn on the warning light
-                return True
-                
-            elif command == "BUZZER:GREEN":
-                self.buzzer_pwm.ChangeFrequency(440)  # Happy A4 note
-                self.buzzer_pwm.ChangeDutyCycle(50)
-                time.sleep(0.1)
-                self.buzzer_pwm.ChangeDutyCycle(0)
-                return True
-                
-            elif command == "BUZZER:RED":
-                self.buzzer_pwm.ChangeFrequency(220)  # Warning A3 note
-                self.buzzer_pwm.ChangeDutyCycle(50)
-                time.sleep(0.5)
-                self.buzzer_pwm.ChangeDutyCycle(0)
-                return True
-                
-            return False
-            
-        except Exception as e:
-            logging.error(f"Oops! Had trouble with command {command}: {e}")
-            return False
+        return self.esp32.send_command(command)
 
     def read_nfc(self):
         """
-        Check if someone is trying to use their card.
+        Read an NFC card if present.
         
         Returns:
-            str: The card's ID if someone is there, None if not
+            str: The card ID if a card is detected, None otherwise
         """
         try:
             uid = self.pn532.read_passive_target(timeout=0.1)
@@ -597,65 +665,36 @@ class GateControlSystem:
                 return ''.join([hex(i)[2:].zfill(2) for i in uid])
             return None
         except Exception as e:
-            logging.error(f"Had trouble reading the card: {e}")
+            logging.error(f"Error reading NFC: {e}")
             return None
-
-    def monitor_gate_status(self):
-        """
-        Keep an eye on the gate and make sure everything's okay!
-        """
-        while self.running:
-            try:
-                # Check if someone is at the gate
-                self.is_occupied = GPIO.input(SENSOR_PIN) == GPIO.LOW
-                
-                # Close the gate if no one's there
-                if not self.is_occupied and self.is_gate_open:
-                    self.close_gate()
-                    
-            except Exception as e:
-                logging.error(f"Had trouble checking the gate: {e}")
-            time.sleep(0.1)
-
-    def cleanup(self):
-        """
-        Clean up everything when we're done.
-        Make sure to turn everything off properly!
-        """
-        try:
-            self.motor_pwm.stop()
-            self.buzzer_pwm.stop()
-            GPIO.cleanup()
-            logging.info("Everything cleaned up nicely! 👋")
-        except Exception as e:
-            logging.error(f"Had trouble cleaning up: {e}")
 
     def open_gate(self):
         """
-        Open the gate and let someone in!
+        Open the gate via ESP32 controller.
         """
         if not self.is_gate_open:
-            logging.info("Opening the gate... 🚪")
-            self.send_command("GATE:OPEN")
-            self.send_command("LED:GREEN")
-            self.send_command("BUZZER:GREEN")
-            self.is_gate_open = True
+            logging.info("Opening gate")
+            if self.send_command("GATE:OPEN"):
+                self.is_gate_open = True
+                self.send_command("LED:GREEN")
+                self.send_command("BUZZER:GREEN")
 
     def close_gate(self):
         """
-        Close the gate when it's time.
+        Close the gate via ESP32 controller.
         """
         if self.is_gate_open:
-            logging.info("Closing the gate... 🔒")
-            self.send_command("GATE:CLOSE")
-            self.is_gate_open = False
+            logging.info("Closing gate")
+            if self.send_command("GATE:CLOSE"):
+                self.is_gate_open = False
 
     def handle_card(self, card_id: str):
         """
-        Handle someone trying to use their card.
+        Handle an NFC card read.
+        Processes the card and controls the gate accordingly.
         
         Args:
-            card_id (str): The card they're using
+            card_id (str): The ID of the detected card
         """
         current_time = time.time()
         if current_time - self.last_card_time < self.card_cooldown:
@@ -664,7 +703,7 @@ class GateControlSystem:
         self.last_card_time = current_time
         self.last_card_id = card_id
         
-        # Check if they're allowed in
+        # Check card authorization
         if self.security_manager.check_access(card_id):
             self.security_manager.log_access(card_id, True)
             if not self.is_gate_open:
@@ -678,21 +717,41 @@ class GateControlSystem:
 
     def run(self):
         """
-        Keep the system running and check for cards!
+        Main system loop.
+        Continuously monitors for NFC cards and processes them.
         """
-        logging.info("Starting up the gate control system! 🚀")
+        logging.info("Starting gate control system")
         try:
-            while self.running:
+            while True:
+                # Check for status updates from ESP32
+                try:
+                    status = self.esp32.status_queue.get_nowait()
+                    if "OCCUPIED" in status:
+                        self.is_occupied = True
+                    elif "CLEAR" in status:
+                        self.is_occupied = False
+                        if self.is_gate_open:
+                            self.close_gate()
+                except queue.Empty:
+                    pass
+
+                # Check for NFC cards
                 card_id = self.read_nfc()
                 if card_id:
                     self.handle_card(card_id)
+                
                 time.sleep(0.05)
 
         except KeyboardInterrupt:
-            logging.info("Shutting down the system... 👋")
-            self.running = False
-            self.close_gate()
+            logging.info("Shutting down system")
             self.cleanup()
+
+    def cleanup(self):
+        """
+        Clean up system resources.
+        """
+        self.esp32.cleanup()
+        logging.info("System cleanup completed")
 
 if __name__ == "__main__":
     try:
