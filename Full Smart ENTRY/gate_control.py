@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 1.5
+Version: 1.6
 """
 
 import time
@@ -663,6 +663,120 @@ class SecurityManager:
         self.load_security_data()
         logging.info("Security system initialized and ready!")
 
+    def load_authorized_cards(self) -> None:
+        """
+        Load authorized cards from storage.
+        Creates default file if none exists.
+        """
+        try:
+            if os.path.exists('authorized_cards.json'):
+                with open('authorized_cards.json', 'r') as f:
+                    self.authorized_cards = json.load(f)
+                logging.info(f"Loaded {len(self.authorized_cards)} authorized cards")
+            else:
+                # Create default authorized cards file
+                self.authorized_cards = {
+                    "0000000000": {  # Default admin card
+                        "added_date": datetime.now().isoformat(),
+                        "description": "Default Admin Card",
+                        "access_level": "admin"
+                    }
+                }
+                self.save_authorized_cards()
+                logging.info("Created default authorized cards file")
+        except Exception as e:
+            logging.error(f"Error loading authorized cards: {e}")
+            # Initialize with empty dict if loading fails
+            self.authorized_cards = {}
+
+    def save_authorized_cards(self) -> None:
+        """
+        Save authorized cards to storage.
+        """
+        try:
+            with open('authorized_cards.json', 'w') as f:
+                json.dump(self.authorized_cards, f, indent=4)
+            logging.info("Authorized cards saved successfully")
+        except Exception as e:
+            logging.error(f"Error saving authorized cards: {e}")
+
+    def add_authorized_card(self, card_id: str, description: str = "", access_level: str = "user") -> bool:
+        """
+        Add a new authorized card.
+        
+        Args:
+            card_id (str): The card ID to add
+            description (str): Description of the card
+            access_level (str): Access level for the card
+            
+        Returns:
+            bool: True if card was added successfully
+        """
+        try:
+            if card_id in self.authorized_cards:
+                logging.warning(f"Card {card_id} already exists")
+                return False
+            
+            self.authorized_cards[card_id] = {
+                "added_date": datetime.now().isoformat(),
+                "description": description,
+                "access_level": access_level
+            }
+            self.save_authorized_cards()
+            logging.info(f"Added new authorized card: {card_id}")
+            return True
+        except Exception as e:
+            logging.error(f"Error adding authorized card: {e}")
+            return False
+
+    def remove_authorized_card(self, card_id: str) -> bool:
+        """
+        Remove an authorized card.
+        
+        Args:
+            card_id (str): The card ID to remove
+            
+        Returns:
+            bool: True if card was removed successfully
+        """
+        try:
+            if card_id not in self.authorized_cards:
+                logging.warning(f"Card {card_id} not found")
+                return False
+            
+            del self.authorized_cards[card_id]
+            self.save_authorized_cards()
+            logging.info(f"Removed authorized card: {card_id}")
+            return True
+        except Exception as e:
+            logging.error(f"Error removing authorized card: {e}")
+            return False
+
+    def log_access(self, card_id: str, success: bool) -> None:
+        """
+        Log an access attempt.
+        
+        Args:
+            card_id (str): The card ID used
+            success (bool): Whether access was granted
+        """
+        try:
+            log_entry = {
+                "timestamp": datetime.now().isoformat(),
+                "card_id": card_id,
+                "success": success,
+                "description": self.authorized_cards.get(card_id, {}).get("description", "Unknown Card")
+            }
+            self.access_log.append(log_entry)
+            
+            # Keep only last 1000 entries
+            if len(self.access_log) > 1000:
+                self.access_log = self.access_log[-1000:]
+            
+            logging.info(f"Access {'granted' if success else 'denied'} for card {card_id}")
+        except Exception as e:
+            logging.error(f"Error logging access: {e}")
+
     def load_security_data(self):
         """
         Load security-related data from storage.
@@ -745,13 +859,10 @@ class SecurityManager:
         
         return False, "Unauthorized card"
 
-    def log_unauthorized_access(self, details: Dict = None) -> bool:
+    def log_unauthorized_access(self) -> bool:
         """
         Log unauthorized access attempt with details.
         
-        Args:
-            details (Dict): Additional details about the attempt
-            
         Returns:
             bool: True if security measures should be triggered
         """
@@ -765,8 +876,6 @@ class SecurityManager:
                 "type": "unauthorized_access",
                 "count": self.unauthorized_access_count
             }
-            if details:
-                log_entry.update(details)
             
             self.access_log.append(log_entry)
             logging.warning(f"Unauthorized access detected! Count: {self.unauthorized_access_count}")
