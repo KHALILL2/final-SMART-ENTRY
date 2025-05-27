@@ -1,25 +1,48 @@
 """
-Gate Control System
-==================
-Key Features:
-- NFC card-based access control
-- Real-time gate status monitoring
-- Emergency stop functionality
-- Access logging and card management
-- Simulation capabilities for testing
+Gate Control System for Raspberry Pi
+===================================
+What's Inside:
+-------------
+- Control panel
+- NFC card reading for secure access
+- Real-time status updates
+- Smart gate closing when the area is clear
+- Helpful lights and sounds to guide users
 
-Hardware Requirements:
-- ESP32 microcontroller
-- PN532 NFC reader
-- Gate control hardware (motors, sensors)
-- LED indicators and buzzer
+Hardware Connections:
+-------------------
+NFC Reader (PN532):
+* SDA -> GPIO2 (Pin 3)    # Data connection
+* SCL -> GPIO3 (Pin 5)    # Clock signal
+* VCC -> 3.3V (Pin 1)     # Power supply
+* GND -> GND (Pin 6)      # Ground connection
+
+Gate Control:
+* Motor Control -> GPIO17 (Pin 11)    # Controls gate movement
+* Gate Sensor -> GPIO27 (Pin 13)      # Detects presence
+* LED Green -> GPIO22 (Pin 15)        # Access granted indicator
+* LED Red -> GPIO23 (Pin 16)          # Access denied indicator
+* Buzzer -> GPIO24 (Pin 18)           # Audio feedback
+
+Quick Start Guide:
+----------------
+1. Connect all hardware components as shown above
+2. Run the program: python3 gate_control.py
+3. Use the control panel to manage access
+4. Present NFC cards to grant access
+
+Need Help?
+---------
+- Green light + short beep = Access granted
+- Red light + long beep = Access denied
+- Emergency stop button is always available
+- Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 1.0
+Version: 1.1
 """
 
 import time
-import serial
 import threading
 import logging
 from datetime import datetime
@@ -35,10 +58,9 @@ import weakref
 import json
 import os
 from typing import Dict, List, Optional
-import hashlib
+import RPi.GPIO as GPIO
 
-# Configure logging with rotation and security
-# This ensures logs don't grow too large and are properly formatted
+# Set up logging to keep track of what's happening
 from logging.handlers import RotatingFileHandler
 logging.basicConfig(
     level=logging.INFO,
@@ -49,38 +71,46 @@ logging.basicConfig(
     ]
 )
 
+# Pin numbers for our hardware
+MOTOR_PIN = 17      # Controls the gate motor
+SENSOR_PIN = 27     # Detects if someone's there
+LED_GREEN = 22      # Shows when access is granted
+LED_RED = 23        # Shows when access is denied
+BUZZER_PIN = 24     # Makes friendly beeps
+
 class SecurityManager:
     """
-    Manages the security aspects of the gate control system.
-    Handles card authorization, access logging, and security policies.
+    Manages access control and security features.
+    Keeps track of authorized cards and access attempts.
     """
     
     def __init__(self):
         """
-        Initialize the security manager with default settings.
-        Sets up card storage, logging, and security parameters.
+        Setting up the security system.
+        Initializes storage for authorized cards and access tracking.
         """
-        # Store authorized cards and their metadata
+        # Storage for authorized cards
         self.authorized_cards: Dict[str, Dict] = {}
         
-        # Store access attempts and their outcomes
+        # Access attempt tracking
         self.access_log: List[Dict] = []
         
         # Security settings
-        self.max_attempts = 3  # Maximum failed attempts before lockout
-        self.lockout_time = 300  # Lockout duration in seconds (5 minutes)
+        self.max_attempts = 3  # Maximum failed attempts before warning
+        self.lockout_time = 300  # 5-minute cooldown after max attempts
         
-        # Track failed attempts and lockout periods
+        # Access attempt tracking
         self.failed_attempts: Dict[str, int] = {}
         self.lockout_until: Dict[str, float] = {}
         
         # Load existing authorized cards
         self.load_authorized_cards()
+        logging.info("Security system initialized and ready!")
 
     def load_authorized_cards(self):
         """
-        Load authorized cards from the JSON storage file.
-        Creates the file if it doesn't exist.
+        Loads the list of authorized cards from storage.
+        Creates the storage file if it doesn't exist.
         """
         try:
             if os.path.exists('authorized_cards.json'):
@@ -88,23 +118,23 @@ class SecurityManager:
                     self.authorized_cards = json.load(f)
                 logging.info(f"Loaded {len(self.authorized_cards)} authorized cards")
         except Exception as e:
-            logging.error(f"Error loading authorized cards: {e}")
+            logging.error(f"Unable to load authorized cards: {e}")
 
     def save_authorized_cards(self):
         """
-        Save the current list of authorized cards to JSON storage.
-        Ensures data persistence across system restarts.
+        Saves the current list of authorized cards to storage.
+        Ensures access permissions are preserved between restarts.
         """
         try:
             with open('authorized_cards.json', 'w') as f:
                 json.dump(self.authorized_cards, f, indent=4)
             logging.info("Authorized cards saved successfully")
         except Exception as e:
-            logging.error(f"Error saving authorized cards: {e}")
+            logging.error(f"Unable to save authorized cards: {e}")
 
     def add_card(self, card_id: str):
         """
-        Add a new card to the authorized cards list.
+        Adds a new card to the authorized list.
         
         Args:
             card_id (str): The unique identifier of the NFC card
@@ -117,47 +147,47 @@ class SecurityManager:
 
     def remove_card(self, card_id: str):
         """
-        Remove a card from the authorized cards list.
+        Removes a card from the authorized list.
         
         Args:
-            card_id (str): The unique identifier of the NFC card to remove
+            card_id (str): The card to remove from authorized access
         """
         if card_id in self.authorized_cards:
             del self.authorized_cards[card_id]
             self.save_authorized_cards()
-            logging.info(f"Removed authorized card: {card_id}")
+            logging.info(f"Removed card {card_id} from authorized list")
 
     def check_access(self, card_id: str) -> bool:
         """
-        Check if a card is authorized and not locked out.
-        Implements security policies including attempt limits and lockout periods.
+        Verifies if a card is authorized for access.
+        Implements security measures including attempt limits.
         
         Args:
-            card_id (str): The unique identifier of the NFC card
+            card_id (str): The card to check for access
             
         Returns:
-            bool: True if access is granted, False otherwise
+            bool: True if access is granted, False if denied
         """
         current_time = time.time()
         
-        # Check if card is currently locked out
+        # Check for active lockout
         if card_id in self.lockout_until:
             if current_time < self.lockout_until[card_id]:
-                logging.warning(f"Card {card_id} is locked out")
+                logging.warning(f"Card {card_id} is currently locked out")
                 return False
             else:
-                # Reset lockout if time has expired
+                # Reset lockout status
                 del self.lockout_until[card_id]
                 self.failed_attempts[card_id] = 0
-                logging.info(f"Card {card_id} lockout expired")
+                logging.info(f"Lockout period ended for card {card_id}")
 
-        # Check if card is authorized
+        # Verify card authorization
         if card_id in self.authorized_cards:
             self.failed_attempts[card_id] = 0
             logging.info(f"Access granted for card {card_id}")
             return True
         
-        # Handle failed attempt
+        # Handle unauthorized access attempt
         self.failed_attempts[card_id] = self.failed_attempts.get(card_id, 0) + 1
         if self.failed_attempts[card_id] >= self.max_attempts:
             self.lockout_until[card_id] = current_time + self.lockout_time
@@ -167,11 +197,11 @@ class SecurityManager:
 
     def log_access(self, card_id: str, success: bool):
         """
-        Log an access attempt with timestamp and outcome.
+        Records access attempts in the system log.
         
         Args:
-            card_id (str): The unique identifier of the NFC card
-            success (bool): Whether the access attempt was successful
+            card_id (str): The card used in the attempt
+            success (bool): Whether access was granted
         """
         log_entry = {
             "timestamp": datetime.now().isoformat(),
@@ -180,24 +210,27 @@ class SecurityManager:
         }
         self.access_log.append(log_entry)
         
-        # Maintain log size by keeping only the most recent entries
+        # Maintain log size
         if len(self.access_log) > 1000:
             self.access_log = self.access_log[-1000:]
         
-        logging.info(f"Access {'granted' if success else 'denied'} for card {card_id}")
+        if success:
+            logging.info(f"Access granted for card {card_id}")
+        else:
+            logging.info(f"Access denied for card {card_id}")
 
 class GateControlGUI:
     """
-    Graphical User Interface for the gate control system.
-    Provides real-time monitoring and control capabilities.
+    Provides the graphical user interface for the gate control system.
+    Features real-time status monitoring and control capabilities.
     """
     
     def __init__(self, root, gate_system):
         """
-        Initialize the GUI with the main window and gate control system.
+        Initializes the graphical interface.
         
         Args:
-            root: The main Tkinter window
+            root: The main application window
             gate_system: The gate control system instance
         """
         self.root = root
@@ -208,25 +241,27 @@ class GateControlGUI:
         self.root.columnconfigure(1, weight=1)
         self.root.rowconfigure(0, weight=1)
         
-        # Create GUI components
+        # Initialize interface components
         self.create_side_panel()
         self.create_terminal_area()
         
-        # Initialize logging queue
+        # Set up message handling
         self.log_queue = queue.Queue()
         self.max_log_lines = 1000
         
-        # Start background processes
+        # Start message processing
         self.process_log_queue()
         
-        # Set up event handlers
+        # Configure window behavior
         self.root.bind('<Configure>', self.on_window_resize)
         self.add_keyboard_shortcuts()
+        
+        # Begin status updates
+        self.update_status()
 
     def add_keyboard_shortcuts(self):
         """
-        Add keyboard shortcuts for common actions.
-        Makes the interface more efficient to use.
+        Configures keyboard shortcuts for common actions.
         """
         self.root.bind('<Control-o>', lambda e: self.manual_control("open"))
         self.root.bind('<Control-c>', lambda e: self.manual_control("close"))
@@ -236,7 +271,7 @@ class GateControlGUI:
 
     def show_access_log(self):
         """
-        Display the access log in a new window.
+        Displays the system access log in a new window.
         Shows recent access attempts with timestamps and outcomes.
         """
         log_window = tk.Toplevel(self.root)
@@ -248,17 +283,18 @@ class GateControlGUI:
         scrollbar = ttk.Scrollbar(log_window, orient=tk.VERTICAL, command=text.yview)
         text.configure(yscrollcommand=scrollbar.set)
         
-        # Add log entries
+        # Display log entries
         for entry in self.gate_system.security_manager.access_log[-100:]:
-            text.insert(tk.END, f"{entry['timestamp']} - {entry['card_id']} - {'Success' if entry['success'] else 'Failed'}\n")
+            status = "✅ Success" if entry['success'] else "❌ Failed"
+            text.insert(tk.END, f"{entry['timestamp']} - Card {entry['card_id']} - {status}\n")
         
         text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
     def show_authorized_cards(self):
         """
-        Display the list of authorized cards in a new window.
-        Shows card IDs and when they were added to the system.
+        Displays the list of authorized cards in a new window.
+        Shows card IDs and their registration dates.
         """
         cards_window = tk.Toplevel(self.root)
         cards_window.title("Authorized Cards")
@@ -267,9 +303,9 @@ class GateControlGUI:
         # Create card list display
         tree = ttk.Treeview(cards_window, columns=("Card ID", "Added Date"), show="headings")
         tree.heading("Card ID", text="Card ID")
-        tree.heading("Added Date", text="Added Date")
+        tree.heading("Added Date", text="Registration Date")
         
-        # Add cards to display
+        # Populate card list
         for card_id, data in self.gate_system.security_manager.authorized_cards.items():
             tree.insert("", tk.END, values=(card_id, data["added_date"]))
         
@@ -277,8 +313,8 @@ class GateControlGUI:
 
     def create_side_panel(self):
         """
-        Create the side control panel with all control buttons and status displays.
-        Organizes controls into logical groups for easy access.
+        Creates the control panel with status displays and control buttons.
+        Organizes controls into logical sections.
         """
         side_panel = ttk.Frame(self.root, padding="10", width=200)
         side_panel.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.E, tk.W))
@@ -293,7 +329,7 @@ class GateControlGUI:
         self.occupancy_status_var = tk.StringVar(value="Clear")
         self.security_status_var = tk.StringVar(value="Normal")
         
-        # Status labels
+        # Status displays
         ttk.Label(status_frame, text="Gate:").pack(anchor=tk.W)
         ttk.Label(status_frame, textvariable=self.gate_status_var).pack(anchor=tk.W)
         ttk.Label(status_frame, text="Occupancy:").pack(anchor=tk.W)
@@ -302,10 +338,10 @@ class GateControlGUI:
         ttk.Label(status_frame, textvariable=self.security_status_var).pack(anchor=tk.W)
         
         # Control Buttons Section
-        control_frame = ttk.LabelFrame(side_panel, text="Control", padding="5")
+        control_frame = ttk.LabelFrame(side_panel, text="Gate Controls", padding="5")
         control_frame.pack(fill=tk.X, pady=5)
         
-        # Gate Control Buttons
+        # Gate control buttons
         ttk.Button(control_frame, text="Open Gate (Ctrl+O)", 
                   command=lambda: self.manual_control("open")).pack(fill=tk.X, pady=2)
         ttk.Button(control_frame, text="Close Gate (Ctrl+C)", 
@@ -320,17 +356,6 @@ class GateControlGUI:
         ttk.Button(security_frame, text="Manage Cards (Ctrl+A)", 
                   command=self.show_authorized_cards).pack(fill=tk.X, pady=2)
         
-        # Simulation Controls Section
-        sim_frame = ttk.LabelFrame(side_panel, text="Simulation", padding="5")
-        sim_frame.pack(fill=tk.X, pady=5)
-        
-        ttk.Button(sim_frame, text="Simulate Valid Login", 
-                  command=self.simulate_valid_login).pack(fill=tk.X, pady=2)
-        ttk.Button(sim_frame, text="Simulate Invalid Login", 
-                  command=self.simulate_invalid_login).pack(fill=tk.X, pady=2)
-        ttk.Button(sim_frame, text="Simulate Alarm", 
-                  command=self.simulate_alarm).pack(fill=tk.X, pady=2)
-        
         # Emergency Stop Button
         ttk.Button(side_panel, text="EMERGENCY STOP (Ctrl+E)", 
                   command=self.emergency_stop, 
@@ -342,8 +367,8 @@ class GateControlGUI:
 
     def create_terminal_area(self):
         """
-        Create the terminal-like display area for system logs and messages.
-        Provides real-time feedback on system operations.
+        Creates the system log display area.
+        Shows real-time system events and status updates.
         """
         terminal_frame = ttk.Frame(self.root, padding="5")
         terminal_frame.grid(row=0, column=1, sticky=(tk.N, tk.S, tk.E, tk.W))
@@ -363,7 +388,7 @@ class GateControlGUI:
         self.terminal.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.E, tk.W))
         scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
         
-        # Add welcome message
+        # Display welcome message
         self.terminal.insert(tk.END, "Gate Control System Terminal\n")
         self.terminal.insert(tk.END, "=" * 50 + "\n")
         self.terminal.insert(tk.END, "System initialized and ready.\n")
@@ -405,10 +430,10 @@ class GateControlGUI:
 
     def manual_control(self, action):
         """
-        Handle manual gate control actions.
+        Handles manual gate control commands.
         
         Args:
-            action (str): The action to perform ('open' or 'close')
+            action (str): The control action to perform ('open' or 'close')
         """
         try:
             if action == "open":
@@ -420,48 +445,10 @@ class GateControlGUI:
         except Exception as e:
             logging.error(f"Error in manual control: {e}")
 
-    def simulate_valid_login(self):
-        """
-        Simulate a successful card login.
-        Useful for testing the system without physical cards.
-        """
-        try:
-            self.log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] Simulating valid login")
-            self.gate_system.open_gate()
-            self.log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] Access granted")
-        except Exception as e:
-            logging.error(f"Error in valid login simulation: {e}")
-
-    def simulate_invalid_login(self):
-        """
-        Simulate a failed card login.
-        Tests the system's response to unauthorized access attempts.
-        """
-        try:
-            self.log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] Simulating invalid login")
-            self.gate_system.send_command("LED:RED")
-            self.gate_system.send_command("BUZZER:RED")
-            self.log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] Access denied")
-        except Exception as e:
-            logging.error(f"Error in invalid login simulation: {e}")
-
-    def simulate_alarm(self):
-        """
-        Simulate an alarm condition.
-        Tests the system's response to security alerts.
-        """
-        try:
-            self.log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] Simulating alarm condition")
-            self.gate_system.send_command("LED:RED")
-            self.gate_system.send_command("BUZZER:RED")
-            self.log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] WARNING: Alarm condition detected")
-        except Exception as e:
-            logging.error(f"Error in alarm simulation: {e}")
-
     def emergency_stop(self):
         """
-        Handle emergency stop requests.
-        Includes confirmation dialog for safety.
+        Handles emergency stop requests.
+        Includes safety confirmation dialog.
         """
         if messagebox.askyesno("Emergency Stop", "Are you sure you want to emergency stop the system?"):
             try:
@@ -473,8 +460,8 @@ class GateControlGUI:
 
     def update_status(self):
         """
-        Update the GUI status displays.
-        Refreshes gate and occupancy status information.
+        Updates the status display with current system state.
+        Refreshes every 500ms.
         """
         try:
             self.gate_status_var.set("Open" if self.gate_system.is_gate_open else "Closed")
@@ -486,80 +473,123 @@ class GateControlGUI:
 
 class GateControlSystem:
     """
-    Main gate control system class.
-    Handles hardware communication and system logic.
+    This is our main gate control system that handles all the hardware stuff.
+    It talks to the NFC reader, controls the gate, and makes sure everything works smoothly!
     """
     
     def __init__(self):
         """
-        Initialize the gate control system.
-        Sets up hardware connections and system state.
+        Let's get everything set up and ready to go!
+        We'll connect to all our hardware and make sure it's working.
         """
-        # Initialize security manager
+        # Set up our security system
         self.security_manager = SecurityManager()
         
-        # Initialize serial connection to ESP32
-        self.esp32 = serial.Serial(
-            '/dev/ttyUSB0',
-            115200,
-            timeout=1,
-            write_timeout=1,
-            inter_byte_timeout=0.1
-        )
-        time.sleep(2)  # Wait for ESP32 to initialize
+        # Get our GPIO pins ready
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False)
         
-        # Initialize NFC reader
+        # Connect to all our hardware
+        GPIO.setup(MOTOR_PIN, GPIO.OUT)
+        GPIO.setup(SENSOR_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.setup(LED_GREEN, GPIO.OUT)
+        GPIO.setup(LED_RED, GPIO.OUT)
+        GPIO.setup(BUZZER_PIN, GPIO.OUT)
+        
+        # Set up our motor control
+        self.motor_pwm = GPIO.PWM(MOTOR_PIN, 50)  # 50Hz for smooth movement
+        self.motor_pwm.start(0)
+        
+        # Set up our buzzer
+        self.buzzer_pwm = GPIO.PWM(BUZZER_PIN, 440)  # Nice A4 note
+        self.buzzer_pwm.start(0)
+        
+        # Connect to our NFC reader
         i2c = busio.I2C(board.SCL, board.SDA, frequency=100000)
         self.pn532 = PN532.PN532_I2C(i2c, debug=False)
         self.pn532.SAM_configuration()
         
-        # Initialize system state
+        # Set up our system state
         self.is_gate_open = False
         self.is_occupied = False
         self.last_card_time = 0
-        self.card_cooldown = 5  # Seconds between card reads
+        self.card_cooldown = 5  # Wait 5 seconds between card reads
         self.last_card_id = None
         
-        # Initialize communication queue
+        # Set up our command system
         self.command_queue = queue.Queue()
         
-        # Start monitoring thread
+        # Start watching the gate
         self.running = True
         self.monitor_thread = threading.Thread(target=self.monitor_gate_status)
         self.monitor_thread.daemon = True
         self.monitor_thread.start()
+        
+        logging.info("Gate control system is ready to go! 🚀")
 
     def send_command(self, command):
         """
-        Send a command to the ESP32.
+        Send commands to our hardware to make things happen!
         
         Args:
-            command (str): The command to send
+            command (str): What we want to do
             
         Returns:
-            str: The response from the ESP32, or None if error
+            bool: True if it worked, False if something went wrong
         """
         try:
-            self.esp32.write(f"{command}\n".encode())
-            response = self.esp32.readline().decode().strip()
-            logging.info(f"Sent: {command}, Received: {response}")
-            return response
-        except serial.SerialTimeoutException:
-            logging.error("Serial write timeout")
-            return None
-        except serial.SerialException as e:
-            logging.error(f"Serial error: {e}")
-            return None
+            if command == "GATE:OPEN":
+                self.motor_pwm.ChangeDutyCycle(90)  # Open the gate smoothly
+                time.sleep(2)  # Wait for it to open
+                self.motor_pwm.ChangeDutyCycle(0)  # Stop the motor
+                self.is_gate_open = True
+                logging.info("Gate opened successfully! 🚪")
+                return True
+                
+            elif command == "GATE:CLOSE":
+                self.motor_pwm.ChangeDutyCycle(10)  # Close the gate gently
+                time.sleep(2)  # Wait for it to close
+                self.motor_pwm.ChangeDutyCycle(0)  # Stop the motor
+                self.is_gate_open = False
+                logging.info("Gate closed successfully! 🔒")
+                return True
+                
+            elif command == "LED:GREEN":
+                GPIO.output(LED_GREEN, GPIO.HIGH)  # Turn on the happy light
+                GPIO.output(LED_RED, GPIO.LOW)
+                return True
+                
+            elif command == "LED:RED":
+                GPIO.output(LED_GREEN, GPIO.LOW)
+                GPIO.output(LED_RED, GPIO.HIGH)  # Turn on the warning light
+                return True
+                
+            elif command == "BUZZER:GREEN":
+                self.buzzer_pwm.ChangeFrequency(440)  # Happy A4 note
+                self.buzzer_pwm.ChangeDutyCycle(50)
+                time.sleep(0.1)
+                self.buzzer_pwm.ChangeDutyCycle(0)
+                return True
+                
+            elif command == "BUZZER:RED":
+                self.buzzer_pwm.ChangeFrequency(220)  # Warning A3 note
+                self.buzzer_pwm.ChangeDutyCycle(50)
+                time.sleep(0.5)
+                self.buzzer_pwm.ChangeDutyCycle(0)
+                return True
+                
+            return False
+            
         except Exception as e:
-            logging.error(f"Unexpected error: {e}")
-            return None
+            logging.error(f"Oops! Had trouble with command {command}: {e}")
+            return False
 
     def read_nfc(self):
         """
-        Read an NFC card if present.
+        Check if someone is trying to use their card.
         
         Returns:
-            str: The card ID if a card is detected, None otherwise
+            str: The card's ID if someone is there, None if not
         """
         try:
             uid = self.pn532.read_passive_target(timeout=0.1)
@@ -567,15 +597,45 @@ class GateControlSystem:
                 return ''.join([hex(i)[2:].zfill(2) for i in uid])
             return None
         except Exception as e:
-            logging.error(f"Error reading NFC: {e}")
+            logging.error(f"Had trouble reading the card: {e}")
             return None
+
+    def monitor_gate_status(self):
+        """
+        Keep an eye on the gate and make sure everything's okay!
+        """
+        while self.running:
+            try:
+                # Check if someone is at the gate
+                self.is_occupied = GPIO.input(SENSOR_PIN) == GPIO.LOW
+                
+                # Close the gate if no one's there
+                if not self.is_occupied and self.is_gate_open:
+                    self.close_gate()
+                    
+            except Exception as e:
+                logging.error(f"Had trouble checking the gate: {e}")
+            time.sleep(0.1)
+
+    def cleanup(self):
+        """
+        Clean up everything when we're done.
+        Make sure to turn everything off properly!
+        """
+        try:
+            self.motor_pwm.stop()
+            self.buzzer_pwm.stop()
+            GPIO.cleanup()
+            logging.info("Everything cleaned up nicely! 👋")
+        except Exception as e:
+            logging.error(f"Had trouble cleaning up: {e}")
 
     def open_gate(self):
         """
-        Open the gate and activate success indicators.
+        Open the gate and let someone in!
         """
         if not self.is_gate_open:
-            logging.info("Opening gate")
+            logging.info("Opening the gate... 🚪")
             self.send_command("GATE:OPEN")
             self.send_command("LED:GREEN")
             self.send_command("BUZZER:GREEN")
@@ -583,37 +643,19 @@ class GateControlSystem:
 
     def close_gate(self):
         """
-        Close the gate.
+        Close the gate when it's time.
         """
         if self.is_gate_open:
-            logging.info("Closing gate")
+            logging.info("Closing the gate... 🔒")
             self.send_command("GATE:CLOSE")
             self.is_gate_open = False
 
-    def monitor_gate_status(self):
-        """
-        Monitor the gate status from the ESP32.
-        Updates system state based on sensor readings.
-        """
-        while self.running:
-            try:
-                if self.esp32.in_waiting:
-                    status = self.esp32.readline().decode().strip()
-                    if "GATE_STATUS:" in status:
-                        self.is_occupied = "OCCUPIED" in status
-                        if not self.is_occupied and self.is_gate_open:
-                            self.close_gate()
-            except Exception as e:
-                logging.error(f"Error monitoring gate: {e}")
-            time.sleep(0.1)
-
     def handle_card(self, card_id: str):
         """
-        Handle an NFC card read.
-        Processes the card and controls the gate accordingly.
+        Handle someone trying to use their card.
         
         Args:
-            card_id (str): The ID of the detected card
+            card_id (str): The card they're using
         """
         current_time = time.time()
         if current_time - self.last_card_time < self.card_cooldown:
@@ -622,7 +664,7 @@ class GateControlSystem:
         self.last_card_time = current_time
         self.last_card_id = card_id
         
-        # Check card authorization
+        # Check if they're allowed in
         if self.security_manager.check_access(card_id):
             self.security_manager.log_access(card_id, True)
             if not self.is_gate_open:
@@ -636,10 +678,9 @@ class GateControlSystem:
 
     def run(self):
         """
-        Main system loop.
-        Continuously monitors for NFC cards and processes them.
+        Keep the system running and check for cards!
         """
-        logging.info("Starting gate control system")
+        logging.info("Starting up the gate control system! 🚀")
         try:
             while self.running:
                 card_id = self.read_nfc()
@@ -648,23 +689,32 @@ class GateControlSystem:
                 time.sleep(0.05)
 
         except KeyboardInterrupt:
-            logging.info("Shutting down system")
+            logging.info("Shutting down the system... 👋")
             self.running = False
             self.close_gate()
-            self.esp32.close()
+            self.cleanup()
 
 if __name__ == "__main__":
-    # Create and run the gate control system
-    gate_system = GateControlSystem()
-    
-    # Create and run the GUI
-    root = tk.Tk()
-    app = GateControlGUI(root, gate_system)
-    
-    # Start the system in a separate thread
-    system_thread = threading.Thread(target=gate_system.run)
-    system_thread.daemon = True
-    system_thread.start()
-    
-    # Start the GUI main loop
-    root.mainloop() 
+    try:
+        # Start up our gate control system
+        gate_system = GateControlSystem()
+        
+        # Create our nice-looking interface
+        root = tk.Tk()
+        app = GateControlGUI(root, gate_system)
+        
+        # Start everything in a separate thread
+        system_thread = threading.Thread(target=gate_system.run)
+        system_thread.daemon = True
+        system_thread.start()
+        
+        # Start our interface
+        root.mainloop()
+        
+    except KeyboardInterrupt:
+        logging.info("Shutting down the system... 👋")
+        gate_system.cleanup()
+    except Exception as e:
+        logging.error(f"Oops! Something went wrong: {e}")
+        if 'gate_system' in locals():
+            gate_system.cleanup() 
