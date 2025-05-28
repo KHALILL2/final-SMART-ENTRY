@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 3.1
+Version: 3.2
 """
 
 import time
@@ -328,52 +328,20 @@ class ESP32Controller:
         self.connected = False
         self.command_queue: queue.Queue[str] = queue.Queue()
         self.status_queue: queue.Queue[str] = queue.Queue()
-
-        # State variables primarily updated by ESP32 feedback
-        self.actual_lock_state: str = "UNKNOWN"  # e.g., "LOCKED", "UNLOCKED", "ERROR"
-        self.gate_state: GateState = GateState.ERROR  # Initial state until connection/status update
+        self.connection_lock = threading.Lock()
+        
+        # State variables
+        self.gate_state = GateState.CLOSED
+        self.actual_lock_state = "UNKNOWN"
         self.unauthorized_detected = False
         self.is_occupied = False
         
-        # Connection management
-        self.reconnect_attempts = 0
-        self.last_connection_check = 0.0
-        self.port_info: Optional[str] = None
-        self.last_command_time = 0.0
-        self.command_timeout = 5.0
-        self.connection_lock = threading.Lock()  # Add lock for thread-safe connection handling
-
-        # Add diagnostic flags
-        self.last_error = None
-        self.connection_diagnostics = {
-            'port_found': False,
-            'permissions_ok': False,
-            'connection_attempted': False,
-            'ping_successful': False,
-            'last_error': None
-        }
-
-        # Add firmware verification flags
-        self.firmware_info = {
-            'version': None,
-            'protocol_version': None,
-            'last_verified': None,
-            'is_compatible': False
-        }
-
         # Start monitoring threads
         self.running = True
         self.start_monitoring_threads()
         
         # Initial connection attempt
         self.connect_esp32()
-        if self.connected:
-            logging.info("Requesting initial status from ESP32...")
-            self.send_command("GATE:STATUS")
-        else:
-            logging.warning("Initial ESP32 connection failed. System will attempt to reconnect automatically.")
-            self.gate_state = GateState.ERROR
-            self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
 
     def start_monitoring_threads(self):
         """
@@ -411,164 +379,80 @@ class ESP32Controller:
                 time.sleep(1)
 
     def connect_esp32(self) -> None:
-        """
-        Attempt to connect to the ESP32 controller via USB with enhanced diagnostics.
-        """
+        """Connect to ESP32 controller."""
         with self.connection_lock:
-            selected_port = self.get_esp32_port() or SERIAL_PORT
-            
-            if not self.check_usb_permissions(selected_port):
-                logging.error(f"USB permission issues detected for {selected_port}. Connection aborted.")
-                self.connected = False
-                self.gate_state = GateState.ERROR
-                self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
-                return
-
-            # Close existing connection if any
-            if self.serial is not None:
-                try:
-                    if self.serial.is_open:
-                        self.serial.close()
-                    self.serial = None
-                except Exception as e:
-                    logging.warning(f"Error closing existing serial connection: {e}")
-
             try:
-                logging.info(f"Attempting to connect to ESP32 on {selected_port} at {self.config.baud_rate} baud...")
+                # Find ESP32 port
+                port = self.get_esp32_port()
+                if not port:
+                    logging.error("No ESP32 device found")
+                    return
                 
-                # Create new serial connection with explicit settings
+                # Create serial connection
                 self.serial = serial.Serial(
-                    port=selected_port,
+                    port=port,
                     baudrate=self.config.baud_rate,
-                    bytesize=serial.EIGHTBITS,
-                    parity=serial.PARITY_NONE,
-                    stopbits=serial.STOPBITS_ONE,
                     timeout=self.config.serial_timeout,
-                    write_timeout=self.config.serial_timeout,
-                    inter_byte_timeout=0.1
+                    write_timeout=self.config.serial_timeout
                 )
                 
                 # Reset the device
                 self.serial.setDTR(False)
                 time.sleep(0.1)
                 self.serial.setDTR(True)
-                time.sleep(2.0)  # Give ESP32 more time to reset and initialize
+                time.sleep(0.5)  # Reduced wait time
                 
-                # Clear any pending data
+                # Clear buffers
                 self.serial.reset_input_buffer()
                 self.serial.reset_output_buffer()
-
-                # Wait for startup messages
-                logging.info("Waiting for ESP32 startup messages...")
+                
+                # Wait for startup message
                 start_time = time.time()
-                startup_messages = []
-                while time.time() - start_time < 10.0:  # Increased timeout to 10 seconds
+                while time.time() - start_time < 2.0:  # Reduced timeout
                     if self.serial.in_waiting:
                         try:
                             line = self.serial.readline().decode('utf-8').strip()
-                            if line:
-                                startup_messages.append(line)
-                                logging.info(f"ESP32 startup message: {line}")
-                                if "SYSTEM:READY" in line:
-                                    break
+                            if "SYSTEM:READY" in line:
+                                self.connected = True
+                                logging.info("ESP32 connected successfully")
+                                # Turn off LED after connection
+                                self.send_command("LED:OFF")
+                                return
                         except UnicodeDecodeError:
-                            logging.warning("Received invalid UTF-8 data during startup")
-                            continue
-                    time.sleep(0.1)
-
-                if not startup_messages:
-                    logging.error("No startup messages received from ESP32")
-                    if self.serial:
-                        self.serial.close()
-                        self.serial = None
-                    self.connected = False
-                    return
-
-                # Test connection with a simple command
-                logging.info("Testing connection with LED command...")
-                self.serial.write(b"LED:GREEN\n")
-                self.serial.flush()
-                
-                # Wait for response
-                response_timeout = 2.0
-                response_start_time = time.time()
-                while time.time() - response_start_time < response_timeout:
-                    if self.serial.in_waiting:
-                        try:
-                            response = self.serial.readline().decode('utf-8').strip()
-                            if response:
-                                logging.info(f"ESP32 response to LED command: {response}")
-                                if "STATUS:LED:GREEN_ON" in response:
-                                    self.connected = True
-                                    self.port_info = selected_port
-                                    self.reconnect_attempts = 0
-                                    logging.info(f"Successfully connected to ESP32 on {selected_port}")
-                                    # Verify firmware after successful connection
-                                    self.verify_firmware()
-                                    return
-                        except UnicodeDecodeError:
-                            logging.warning("Received invalid UTF-8 data in response")
                             continue
                     time.sleep(0.1)
                 
-                logging.warning("No valid response received to LED command")
+                logging.error("No startup message received from ESP32")
                 if self.serial:
                     self.serial.close()
                     self.serial = None
-                self.connected = False
-            
-            except serial.SerialException as e:
-                logging.error(f"SerialException on port {selected_port}: {e}")
-                if "Permission denied" in str(e):
-                    logging.error("Ensure user has permissions for serial port (e.g., member of 'dialout' group).")
-                if self.serial and self.serial.is_open:
-                    self.serial.close()
-                    self.serial = None
-                self.connected = False
+                
             except Exception as e:
-                logging.error(f"Unexpected error connecting to ESP32 on {selected_port}: {e}")
-                if self.serial and self.serial.is_open:
+                logging.error(f"Error connecting to ESP32: {e}")
+                if self.serial:
                     self.serial.close()
                     self.serial = None
-                self.connected = False
-
-            if not self.connected:
-                self.gate_state = GateState.ERROR
-                self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
-                self.actual_lock_state = "UNKNOWN"
-                self.status_queue.put(f"UPDATE:LOCK_STATE:{self.actual_lock_state}")
 
     def send_command(self, command: str, response_timeout: Optional[float] = None) -> Union[str, bool]:
-        """
-        Send a command to the ESP32 controller with timeout.
-        
-        Args:
-            command (str): The command to send
-            response_timeout (Optional[float]): Command timeout in seconds
-            
-        Returns:
-            Union[str, bool]: Response string if timeout specified, True if command sent successfully
-        """
-        with self.connection_lock:  # Ensure thread-safe command sending
-            if not self.connected or self.serial is None or not self.serial.is_open:
+        """Send a command to the ESP32 controller."""
+        with self.connection_lock:
+            if not self.connected or not self.serial or not self.serial.is_open:
                 logging.warning(f"ESP32 not connected. Cannot send command: {command}")
                 return False
             
             try:
-                # Clear input buffer before sending command if expecting a direct response
-                if response_timeout is not None:
-                    self.serial.reset_input_buffer()
-
+                # Clear input buffer before sending command
+                self.serial.reset_input_buffer()
+                
                 # Ensure command ends with newline
                 if not command.endswith('\n'):
                     command = f"{command}\n"
-
+                
                 # Send command
-                logging.debug(f"Sending command to ESP32: {command.strip()}")
+                logging.info(f"Sending command to ESP32: {command.strip()}")
                 self.serial.write(command.encode('utf-8'))
-                self.serial.flush()  # Ensure command is sent
-                self.last_command_time = time.time()
-
+                self.serial.flush()
+                
                 if response_timeout:
                     start_time = time.time()
                     while time.time() - start_time < response_timeout:
@@ -576,23 +460,18 @@ class ESP32Controller:
                             try:
                                 response = self.serial.readline().decode('utf-8').strip()
                                 if response:
-                                    logging.debug(f"Received response from ESP32: {response}")
+                                    logging.info(f"Received response from ESP32: {response}")
                                     return response
                             except UnicodeDecodeError:
-                                logging.warning("Received invalid UTF-8 data from ESP32")
                                 continue
                         time.sleep(0.01)
                     logging.warning(f"Timeout waiting for response to command: {command.strip()}")
                     return False
                 return True
-            except serial.SerialException as e:
-                logging.error(f"SerialException sending command '{command.strip()}': {e}")
-                self.connected = False
-                self.gate_state = GateState.ERROR
-                self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
-                return False
+                
             except Exception as e:
-                logging.error(f"Unexpected error sending command '{command.strip()}': {e}")
+                logging.error(f"Error sending command '{command.strip()}': {e}")
+                self.connected = False
                 return False
 
     def emergency_stop(self):
@@ -720,66 +599,39 @@ class ESP32Controller:
                 time.sleep(1)
 
     def process_commands(self):
-        """
-        Process commands from the command queue.
-        Sends them to the ESP32 controller.
-        """
+        """Process commands from the command queue."""
         while self.running:
             try:
                 command = self.command_queue.get(timeout=0.1)
                 if command:
-                    self.send_command(command)
+                    response = self.send_command(command, response_timeout=1.0)
+                    if response:
+                        self.status_queue.put(f"RESPONSE:{command}:{response}")
             except queue.Empty:
                 continue
             except Exception as e:
                 logging.error(f"Error processing command: {e}")
 
     def monitor_status_from_esp32(self):
-        """
-        Monitor status updates from the ESP32.
-        Updates system state based on ESP32 reports.
-        """
+        """Monitor status updates from ESP32."""
         while self.running:
             if not self.connected or not self.serial or not self.serial.is_open:
                 time.sleep(0.5)
                 continue
             
             try:
-                if self.serial.in_waiting > 0:
-                    raw_status = self.serial.readline().decode('utf-8').strip()
-                    if not raw_status: continue
-
-                    logging.debug(f"ESP32 Raw In: {raw_status}")
-                    
-                    if raw_status.startswith("GATE_STATUS:"):
-                        status = raw_status.split(":")[1]
-                        self.is_occupied = (status == "OCCUPIED")
-                        self.status_queue.put(f"STATUS:OCCUPANCY:{status}")
-                    elif raw_status.startswith("Gate opened"):
-                        self.gate_state = GateState.OPEN
-                        self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
-                    elif raw_status.startswith("Gate closed"):
-                        self.gate_state = GateState.CLOSED
-                        self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
-                    elif raw_status.startswith("Received:"):
-                        # Echo of received command, ignore
-                        pass
-                    else:
-                        logging.debug(f"ESP32 Unparsed: {raw_status}")
-
-            except serial.SerialException as e:
-                logging.error(f"SerialException in ESP32 status monitoring: {e}")
-                self.connected = False
-                self.gate_state = GateState.ERROR
-                self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
-                time.sleep(self.config.reconnect_delay)
-            except UnicodeDecodeError as e:
-                logging.warning(f"UnicodeDecodeError reading from ESP32: {e}")
+                if self.serial.in_waiting:
+                    try:
+                        line = self.serial.readline().decode('utf-8').strip()
+                        if line:
+                            logging.info(f"ESP32 Status: {line}")
+                            self.status_queue.put(line)
+                    except UnicodeDecodeError:
+                        continue
+                time.sleep(0.01)
             except Exception as e:
-                logging.error(f"Unexpected error in ESP32 status monitoring: {e}")
+                logging.error(f"Error monitoring ESP32 status: {e}")
                 time.sleep(0.1)
-            
-            time.sleep(0.02)
 
     def cleanup(self):
         """
@@ -1521,7 +1373,7 @@ class GateControlGUI:
         
         # Configure main window
         self.root.title("Gate Control System")
-        self.root.geometry("800x600")
+        self.root.geometry("1000x800")  # Increased window size
         self.root.configure(bg='#f0f0f0')
         
         # Create main frame with padding
@@ -1541,6 +1393,41 @@ class GateControlGUI:
         
         self.lock_status = ttk.Label(self.status_frame, text="Lock: Unknown", foreground="gray")
         self.lock_status.pack(side=tk.LEFT, padx=5)
+        
+        # Create health monitoring frame
+        self.health_frame = ttk.LabelFrame(self.main_frame, text="System Health", padding="5")
+        self.health_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Create a grid for health indicators
+        self.health_grid = ttk.Frame(self.health_frame)
+        self.health_grid.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Component Health Indicators
+        self.component_health = {
+            'motor': {'label': ttk.Label(self.health_grid, text="Motor: Unknown"), 'status': "Unknown"},
+            'sensors': {'label': ttk.Label(self.health_grid, text="Sensors: Unknown"), 'status': "Unknown"},
+            'lock': {'label': ttk.Label(self.health_grid, text="Lock: Unknown"), 'status': "Unknown"},
+            'ir_sensor': {'label': ttk.Label(self.health_grid, text="IR Sensor: Unknown"), 'status': "Unknown"}
+        }
+        
+        # Temperature and Power Indicators
+        self.system_metrics = {
+            'temperature': {'label': ttk.Label(self.health_grid, text="Temperature: --°C"), 'value': 0},
+            'power': {'label': ttk.Label(self.health_grid, text="Power: --V"), 'value': 0},
+            'memory': {'label': ttk.Label(self.health_grid, text="Memory: --%"), 'value': 0},
+            'uptime': {'label': ttk.Label(self.health_grid, text="Uptime: --:--:--"), 'value': 0}
+        }
+        
+        # Layout health indicators in a grid
+        row = 0
+        for component, data in self.component_health.items():
+            data['label'].grid(row=row, column=0, padx=5, pady=2, sticky=tk.W)
+            row += 1
+            
+        row = 0
+        for metric, data in self.system_metrics.items():
+            data['label'].grid(row=row, column=1, padx=5, pady=2, sticky=tk.W)
+            row += 1
         
         # Control buttons frame
         self.control_frame = ttk.LabelFrame(self.main_frame, text="Gate Controls", padding="5")
@@ -1612,6 +1499,69 @@ class GateControlGUI:
         
         # Add initial log message
         self.log_message("Gate Control System initialized", "info")
+        
+        # Start system metrics update
+        self.update_system_metrics()
+
+    def update_system_metrics(self):
+        """Update system health metrics."""
+        try:
+            # Request system metrics from ESP32
+            if self.esp32.connected:
+                # Request temperature
+                temp_response = self.esp32.send_command("STATUS:TEMP", response_timeout=1.0)
+                if temp_response and "TEMP:" in temp_response:
+                    temp = float(temp_response.split(":")[1])
+                    self.system_metrics['temperature']['value'] = temp
+                    self.system_metrics['temperature']['label'].config(
+                        text=f"Temperature: {temp:.1f}°C",
+                        foreground="green" if temp < 80 else "red"
+                    )
+                
+                # Request power status
+                power_response = self.esp32.send_command("STATUS:POWER", response_timeout=1.0)
+                if power_response and "POWER:" in power_response:
+                    power = float(power_response.split(":")[1])
+                    self.system_metrics['power']['value'] = power
+                    self.system_metrics['power']['label'].config(
+                        text=f"Power: {power:.1f}V",
+                        foreground="green" if 4.5 <= power <= 5.5 else "red"
+                    )
+                
+                # Request component health
+                health_response = self.esp32.send_command("STATUS:HEALTH", response_timeout=1.0)
+                if health_response:
+                    for component in self.component_health:
+                        if f"{component.upper()}_STATUS:" in health_response:
+                            status = health_response.split(f"{component.upper()}_STATUS:")[1].split()[0]
+                            self.component_health[component]['status'] = status
+                            self.component_health[component]['label'].config(
+                                text=f"{component.title()}: {status}",
+                                foreground="green" if status == "OK" else "red"
+                            )
+                
+                # Update memory usage
+                memory_response = self.esp32.send_command("STATUS:MEMORY", response_timeout=1.0)
+                if memory_response and "MEMORY:" in memory_response:
+                    memory = float(memory_response.split(":")[1])
+                    self.system_metrics['memory']['value'] = memory
+                    self.system_metrics['memory']['label'].config(
+                        text=f"Memory: {memory:.1f}%",
+                        foreground="green" if memory < 80 else "orange"
+                    )
+                
+                # Update uptime
+                uptime_response = self.esp32.send_command("STATUS:UPTIME", response_timeout=1.0)
+                if uptime_response and "UPTIME:" in uptime_response:
+                    uptime = uptime_response.split(":")[1]
+                    self.system_metrics['uptime']['value'] = uptime
+                    self.system_metrics['uptime']['label'].config(text=f"Uptime: {uptime}")
+        
+        except Exception as e:
+            logging.error(f"Error updating system metrics: {e}")
+        
+        # Schedule next update
+        self.root.after(5000, self.update_system_metrics)  # Update every 5 seconds
 
     def update_status(self):
         """Update the status display with current system state."""
@@ -1998,7 +1948,7 @@ class GateControlSystem:
 
 if __name__ == "__main__":
     try:
-        # Configure logging first
+        # Configure logging
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
@@ -2008,41 +1958,17 @@ if __name__ == "__main__":
             ]
         )
         
-        # Start up our gate control system
+        # Start up gate control system
         gate_system = GateControlSystem()
-        
-        # Run diagnostics before starting
-        logging.info("Running initial system diagnostics...")
-        diagnostics = gate_system.esp32.run_diagnostics()
-        logging.info("Diagnostic results:")
-        for key, value in diagnostics.items():
-            logging.info(f"{key}: {value}")
-        
-        # Check firmware status
-        firmware_status = gate_system.esp32.get_firmware_status()
-        logging.info("\nFirmware Status:")
-        logging.info(firmware_status)
-        
-        # Check firmware requirements
-        missing_requirements = gate_system.esp32.check_firmware_requirements()
-        if missing_requirements:
-            logging.error("\nFirmware Requirements Not Met:")
-            for req in missing_requirements:
-                logging.error(f"- {req}")
-            logging.error("\nPlease update the ESP32 firmware to the latest version")
-            logging.error("Required firmware features:")
-            logging.error("1. Version reporting (VERSION command)")
-            logging.error("2. Protocol version reporting (PROTOCOL command)")
-            logging.error("3. Basic command support (PING, STATUS)")
         
         # Create and configure the main window
         root = tk.Tk()
         root.title("Gate Control System")
-        root.geometry("800x600")
+        root.geometry("1000x800")  # Increased window size
         
         # Set the theme
         style = ttk.Style()
-        style.theme_use('clam')  # Use a modern theme
+        style.theme_use('clam')
         
         # Create the GUI
         app = GateControlGUI(root, gate_system.hardware_config, gate_system.esp32)
@@ -2060,6 +1986,6 @@ if __name__ == "__main__":
         if 'gate_system' in locals():
             gate_system.cleanup()
     except Exception as e:
-        logging.error(f"Oops! Something went wrong: {e}")
+        logging.error(f"Error: {e}")
         if 'gate_system' in locals():
             gate_system.cleanup() 
