@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 2.7
+Version: 2.8
 """
 
 import time
@@ -452,7 +452,7 @@ class ESP32Controller:
                 self.serial.setDTR(False)
                 time.sleep(0.1)
                 self.serial.setDTR(True)
-                time.sleep(1.5)  # Give ESP32 time to reset and initialize
+                time.sleep(2.0)  # Give ESP32 more time to reset and initialize
                 
                 # Clear any pending data
                 self.serial.reset_input_buffer()
@@ -462,14 +462,14 @@ class ESP32Controller:
                 logging.info("Waiting for ESP32 startup messages...")
                 start_time = time.time()
                 startup_messages = []
-                while time.time() - start_time < 5.0:  # Wait up to 5 seconds for startup
+                while time.time() - start_time < 10.0:  # Increased timeout to 10 seconds
                     if self.serial.in_waiting:
                         try:
                             line = self.serial.readline().decode('utf-8').strip()
                             if line:
                                 startup_messages.append(line)
                                 logging.info(f"ESP32 startup message: {line}")
-                                if "ESP32_READY" in line:
+                                if "SYSTEM:READY" in line:
                                     break
                         except UnicodeDecodeError:
                             logging.warning("Received invalid UTF-8 data during startup")
@@ -486,7 +486,7 @@ class ESP32Controller:
 
                 # Test connection with a simple command
                 logging.info("Testing connection with LED command...")
-                response = self.send_command("LED:GREEN", response_timeout=1.0)
+                response = self.send_command("LED:GREEN", response_timeout=2.0)
                 if response and "Green LED on" in response:
                     self.connected = True
                     self.port_info = selected_port
