@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 3.2
+Version: 3.3
 """
 
 import time
@@ -335,6 +335,10 @@ class ESP32Controller:
         self.actual_lock_state = "UNKNOWN"
         self.unauthorized_detected = False
         self.is_occupied = False
+        
+        # Connection monitoring variables
+        self.last_connection_check = time.time()
+        self.reconnect_attempts = 0
         
         # Start monitoring threads
         self.running = True
