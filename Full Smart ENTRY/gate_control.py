@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 1.8
+Version: 1.9
 """
 
 import time
@@ -463,12 +463,24 @@ class ESP32Controller:
             # List all available ports
             ports = serial.tools.list_ports.comports()
             
+            if not ports:
+                logging.error("No USB devices detected. Please check USB connections.")
+                return None
+                
+            logging.info("Available USB devices:")
+            for port in ports:
+                logging.info(f"Device: {port.device}, Description: {port.description}, Hardware ID: {port.hwid}")
+            
             # Try to find ESP32 port
             for port in ports:
                 # Common ESP32 USB identifiers
-                if any(identifier in str(port.description).upper() for identifier in ['CP210', 'CH340', 'SILICON LABS']):
+                if any(identifier in str(port.description).upper() for identifier in ['CP210', 'CH340', 'SILICON LABS', 'ESP32']):
+                    logging.info(f"Found potential ESP32 device: {port.device}")
                     return port.device
+                    
+            logging.warning("No ESP32 device found. Please ensure ESP32 is connected and recognized.")
             return None
+            
         except Exception as e:
             logging.error(f"Error finding ESP32 port: {e}")
             return None
@@ -485,9 +497,14 @@ class ESP32Controller:
             result = subprocess.run(['groups'], capture_output=True, text=True)
             if 'dialout' not in result.stdout:
                 logging.warning("User not in dialout group. Attempting to fix permissions...")
-                subprocess.run(['sudo', 'usermod', '-a', '-G', 'dialout', os.getenv('USER')])
-                logging.info("Please log out and back in for changes to take effect")
-                return False
+                try:
+                    # Try to add user to dialout group
+                    subprocess.run(['sudo', 'usermod', '-a', '-G', 'dialout', os.getenv('USER')], check=True)
+                    logging.info("Added user to dialout group. Please log out and back in for changes to take effect.")
+                except subprocess.CalledProcessError as e:
+                    logging.error(f"Failed to add user to dialout group: {e}")
+                    logging.error("Please run: sudo usermod -a -G dialout $USER")
+                    return False
             return True
         except Exception as e:
             logging.error(f"Error checking USB permissions: {e}")
@@ -503,10 +520,21 @@ class ESP32Controller:
             return
 
         try:
+            # First, check if any USB devices are detected
+            ports = serial.tools.list_ports.comports()
+            if not ports:
+                logging.error("No USB devices detected. Please check:")
+                logging.error("1. USB cable is properly connected")
+                logging.error("2. ESP32 is powered on")
+                logging.error("3. USB cable is not damaged")
+                return
+
             esp32_port = self.get_esp32_port()
             if esp32_port:
                 try:
+                    # Try to open the port
                     self.serial = serial.Serial(esp32_port, self.config.baud_rate, timeout=self.config.serial_timeout)
+                    
                     # Test connection
                     if self.send_command("STATUS"):
                         response = self.serial.readline().decode().strip()
@@ -514,15 +542,29 @@ class ESP32Controller:
                             self.connected = True
                             self.port_info = esp32_port
                             self.reconnect_attempts = 0
-                            logging.info(f"Connected to ESP32 on {esp32_port}")
+                            logging.info(f"Successfully connected to ESP32 on {esp32_port}")
                             return
+                        else:
+                            logging.error("No response from ESP32. Please check if ESP32 is properly programmed.")
+                    else:
+                        logging.error("Failed to send test command to ESP32")
+                        
                 except serial.SerialException as e:
                     logging.error(f"Serial port error: {e}")
+                    logging.error("Please check:")
+                    logging.error("1. No other program is using the port")
+                    logging.error("2. ESP32 is not in bootloader mode")
+                    logging.error("3. Try unplugging and replugging the ESP32")
                     if self.serial and self.serial.is_open:
                         self.serial.close()
                     self.serial = None
+            else:
+                logging.error("Could not find ESP32 device. Please check:")
+                logging.error("1. ESP32 is properly connected")
+                logging.error("2. ESP32 is powered on")
+                logging.error("3. USB cable is working")
+                logging.error("4. ESP32 drivers are installed")
             
-            logging.warning("Could not find or connect to ESP32 device")
             self.connected = False
             
         except Exception as e:
@@ -545,7 +587,12 @@ class ESP32Controller:
                             self.connect_esp32()
                             self.reconnect_attempts += 1
                         else:
-                            logging.error("Max reconnection attempts reached. Please check USB connection and restart the system.")
+                            logging.error("Max reconnection attempts reached. Please:")
+                            logging.error("1. Check USB connection")
+                            logging.error("2. Restart the ESP32")
+                            logging.error("3. Restart the Raspberry Pi")
+                            logging.error("4. Check USB cable")
+                            logging.error("5. Verify ESP32 is powered")
                     else:
                         # Verify connection is still active
                         try:
