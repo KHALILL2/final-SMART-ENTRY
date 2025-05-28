@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 1.7
+Version: 1.8
 """
 
 import time
@@ -347,12 +347,14 @@ class ESP32Controller:
         self.last_command_time = 0.0
         self.command_timeout = 5.0  # Seconds
         
-        # Start connection attempt
-        self.connect_esp32()
-        
         # Start monitoring threads
         self.running = True
         self.start_monitoring_threads()
+        
+        # Initial connection attempt
+        self.connect_esp32()
+        if not self.connected:
+            logging.warning("Initial ESP32 connection failed. System will attempt to reconnect automatically.")
 
     def start_monitoring_threads(self):
         """
@@ -407,7 +409,7 @@ class ESP32Controller:
             raise ValueError("Timeout must be a number")
         
         if not self.connected or self.serial is None:
-            logging.error("Cannot send command: ESP32 not connected")
+            logging.warning("Cannot send command: ESP32 not connected")
             return False
         
         try:
@@ -422,10 +424,14 @@ class ESP32Controller:
                         if response:
                             return True
                     time.sleep(0.1)
-                logging.error(f"Command timeout: {command}")
+                logging.warning(f"Command timeout: {command}")
                 return False
             
             return True
+        except serial.SerialException as e:
+            logging.error(f"Serial communication error: {e}")
+            self.connected = False
+            return False
         except Exception as e:
             logging.error(f"Error sending command to ESP32: {e}")
             self.connected = False
@@ -493,23 +499,30 @@ class ESP32Controller:
         Automatically detects the correct port.
         """
         if not self.check_usb_permissions():
+            logging.error("USB permissions check failed. Please ensure you have proper permissions.")
             return
 
         try:
             esp32_port = self.get_esp32_port()
             if esp32_port:
-                self.serial = serial.Serial(esp32_port, self.config.baud_rate, timeout=self.config.serial_timeout)
-                # Test connection
-                self.send_command("STATUS")
-                response = self.serial.readline().decode().strip()
-                if response:
-                    self.connected = True
-                    self.port_info = esp32_port
-                    self.reconnect_attempts = 0
-                    logging.info(f"Connected to ESP32 on {esp32_port}")
-                    return
+                try:
+                    self.serial = serial.Serial(esp32_port, self.config.baud_rate, timeout=self.config.serial_timeout)
+                    # Test connection
+                    if self.send_command("STATUS"):
+                        response = self.serial.readline().decode().strip()
+                        if response:
+                            self.connected = True
+                            self.port_info = esp32_port
+                            self.reconnect_attempts = 0
+                            logging.info(f"Connected to ESP32 on {esp32_port}")
+                            return
+                except serial.SerialException as e:
+                    logging.error(f"Serial port error: {e}")
+                    if self.serial and self.serial.is_open:
+                        self.serial.close()
+                    self.serial = None
             
-            logging.error("Could not find ESP32 device")
+            logging.warning("Could not find or connect to ESP32 device")
             self.connected = False
             
         except Exception as e:
@@ -532,11 +545,12 @@ class ESP32Controller:
                             self.connect_esp32()
                             self.reconnect_attempts += 1
                         else:
-                            logging.error("Max reconnection attempts reached. Please check USB connection.")
+                            logging.error("Max reconnection attempts reached. Please check USB connection and restart the system.")
                     else:
                         # Verify connection is still active
                         try:
-                            self.send_command("PING")
+                            if not self.send_command("PING"):
+                                raise Exception("Failed to send ping command")
                             response = self.serial.readline().decode().strip()
                             if not response:
                                 raise Exception("No response from ESP32")
