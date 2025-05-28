@@ -32,13 +32,13 @@ ESP32 USB Connection:
 * No additional wiring needed
 
 ESP32 Hardware Connections:
-* Motor Control -> GPIO17 (Pin 11)    # Controls gate movement
-* Gate Sensor -> GPIO27 (Pin 13)      # Detects presence
-* LED Green -> GPIO22 (Pin 15)        # Access granted indicator
-* LED Red -> GPIO23 (Pin 16)          # Access denied indicator
-* Buzzer -> GPIO24 (Pin 18)           # Audio feedback
-* IR Sensor -> GPIO25 (Pin 22)        # Detects unauthorized access
-* Solenoid Lock -> GPIO26 (Pin 37)    # Locks gate mechanism
+* Motor Control -> GPIO26 (Pin 11)    # Controls gate movement
+* Gate Sensor -> GPIO27 (Pin 12)      # Detects presence
+* LED Green -> GPIO18 (Pin 30)        # Access granted indicator
+* LED Red -> GPIO19 (Pin 31)          # Access denied indicator
+* Buzzer -> Connected to LED pins     # Audio feedback (shared with LEDs)
+* IR Sensor -> GPIO34 (Pin 6)         # Detects unauthorized access
+* Solenoid Lock -> GPIO27 (Pin 12)    # Locks gate mechanism
 
 Security Features:
 ----------------
@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 2.4
+Version: 2.7
 """
 
 import time
@@ -333,6 +333,7 @@ class ESP32Controller:
         self.actual_lock_state: str = "UNKNOWN"  # e.g., "LOCKED", "UNLOCKED", "ERROR"
         self.gate_state: GateState = GateState.ERROR  # Initial state until connection/status update
         self.unauthorized_detected = False
+        self.is_occupied = False
         
         # Connection management
         self.reconnect_attempts = 0
@@ -350,7 +351,7 @@ class ESP32Controller:
         self.connect_esp32()
         if self.connected:
             logging.info("Requesting initial status from ESP32...")
-            self.send_command("REQUEST_STATUS:ALL")
+            self.send_command("GATE:STATUS")
         else:
             logging.warning("Initial ESP32 connection failed. System will attempt to reconnect automatically.")
             self.gate_state = GateState.ERROR
@@ -457,26 +458,43 @@ class ESP32Controller:
                 self.serial.reset_input_buffer()
                 self.serial.reset_output_buffer()
 
-                # Test connection with PING
-                response = self.send_command("PING", response_timeout=1.0)
-                if response and (str(response).upper() == "PONG" or str(response).upper() == "ACK:PING"):
+                # Wait for startup messages
+                logging.info("Waiting for ESP32 startup messages...")
+                start_time = time.time()
+                startup_messages = []
+                while time.time() - start_time < 5.0:  # Wait up to 5 seconds for startup
+                    if self.serial.in_waiting:
+                        try:
+                            line = self.serial.readline().decode('utf-8').strip()
+                            if line:
+                                startup_messages.append(line)
+                                logging.info(f"ESP32 startup message: {line}")
+                                if "ESP32_READY" in line:
+                                    break
+                        except UnicodeDecodeError:
+                            logging.warning("Received invalid UTF-8 data during startup")
+                            continue
+                    time.sleep(0.1)
+
+                if not startup_messages:
+                    logging.error("No startup messages received from ESP32")
+                    if self.serial:
+                        self.serial.close()
+                        self.serial = None
+                    self.connected = False
+                    return
+
+                # Test connection with a simple command
+                logging.info("Testing connection with LED command...")
+                response = self.send_command("LED:GREEN", response_timeout=1.0)
+                if response and "Green LED on" in response:
                     self.connected = True
                     self.port_info = selected_port
                     self.reconnect_attempts = 0
-                    logging.info(f"Successfully connected to ESP32 on {selected_port}.")
-
-                    # After successful connection, verify firmware
-                    self.verify_firmware()
-                    if not self.firmware_info['is_compatible']:
-                        logging.error("ESP32 firmware is not compatible with this system")
-                        logging.error("Please update the ESP32 firmware to the latest version")
-                        self.connected = False
-                        if self.serial:
-                            self.serial.close()
-                            self.serial = None
+                    logging.info(f"Successfully connected to ESP32 on {selected_port}")
                     return
                 else:
-                    logging.warning(f"ESP32 on {selected_port} did not respond to PING as expected (Got: '{response}').")
+                    logging.warning(f"ESP32 on {selected_port} did not respond as expected (Got: '{response}')")
                     if self.serial: 
                         self.serial.close()
                         self.serial = None
@@ -715,60 +733,22 @@ class ESP32Controller:
                     if not raw_status: continue
 
                     logging.debug(f"ESP32 Raw In: {raw_status}")
-                    parts = raw_status.upper().split(':')
-                    msg_type = parts[0]
                     
-                    processed = False
-                    if msg_type == "STATUS" and len(parts) >= 3:
-                        component = parts[1]
-                        value = parts[2]
-                        if component == "GATE":
-                            try:
-                                new_gate_state_enum = GateState[value]
-                                if self.gate_state != new_gate_state_enum:
-                                    self.gate_state = new_gate_state_enum
-                                    logging.info(f"ESP32 reported Gate State change: {self.gate_state.name}")
-                                    self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
-                                processed = True
-                            except KeyError:
-                                logging.warning(f"Unknown gate state value from ESP32: '{value}' in '{raw_status}'")
-                        elif component == "LOCK":
-                            if self.actual_lock_state != value:
-                                self.actual_lock_state = value
-                                logging.info(f"ESP32 reported Lock State change: {self.actual_lock_state}")
-                                self.status_queue.put(f"UPDATE:LOCK_STATE:{self.actual_lock_state}")
-                            processed = True
-                        elif component == "OCCUPANCY":
-                            self.status_queue.put(f"STATUS:OCCUPANCY:{value}")
-                            processed = True
-                            
-                    elif msg_type == "EVENT" and len(parts) >= 3:
-                        event_type = parts[1]
-                        if event_type == "IR_SENSOR" and parts[2] == "UNAUTHORIZED":
-                            self.unauthorized_detected = True
-                            self.status_queue.put("EVENT:UNAUTHORIZED_ACCESS")
-                            logging.warning("ESP32 reported unauthorized access event (IR).")
-                        processed = True
-
-                    elif msg_type == "ACK" and len(parts) >= 2:
-                        command_acked = parts[1]
-                        logging.info(f"ESP32 ACK: {command_acked}")
-                        self.status_queue.put(raw_status)
-                        processed = True
-
-                    elif msg_type == "NACK" and len(parts) >= 2:
-                        command_nacked = parts[1]
-                        reason = ":".join(parts[2:]) if len(parts) > 2 else "No reason"
-                        logging.warning(f"ESP32 NACK: {command_nacked} - Reason: {reason}")
-                        self.status_queue.put(raw_status)
-                        processed = True
-                    
-                    elif raw_status == "PONG":
-                        logging.debug("ESP32 PONG received.")
-                        processed = True
-
-                    if not processed:
-                        logging.debug(f"ESP32 Unparsed/Generic: {raw_status}")
+                    if raw_status.startswith("GATE_STATUS:"):
+                        status = raw_status.split(":")[1]
+                        self.is_occupied = (status == "OCCUPIED")
+                        self.status_queue.put(f"STATUS:OCCUPANCY:{status}")
+                    elif raw_status.startswith("Gate opened"):
+                        self.gate_state = GateState.OPEN
+                        self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
+                    elif raw_status.startswith("Gate closed"):
+                        self.gate_state = GateState.CLOSED
+                        self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
+                    elif raw_status.startswith("Received:"):
+                        # Echo of received command, ignore
+                        pass
+                    else:
+                        logging.debug(f"ESP32 Unparsed: {raw_status}")
 
             except serial.SerialException as e:
                 logging.error(f"SerialException in ESP32 status monitoring: {e}")
@@ -1806,7 +1786,7 @@ class GateControlSystem:
             time.sleep(0.5)  # Wait for lock to engage
             
             # Request initial status from ESP32
-            self.esp32.send_command("REQUEST_STATUS:ALL")
+            self.esp32.send_command("GATE:STATUS")
             
             self.system_ready = True
             logging.info("Gate control system initialized and ready")
