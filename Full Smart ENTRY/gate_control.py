@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 2.2
+Version: 2.3
 """
 
 import time
@@ -340,6 +340,7 @@ class ESP32Controller:
         self.port_info: Optional[str] = None
         self.last_command_time = 0.0
         self.command_timeout = 5.0
+        self.connection_lock = threading.Lock()  # Add lock for thread-safe connection handling
 
         # Start monitoring threads
         self.running = True
@@ -390,6 +391,91 @@ class ESP32Controller:
                 logging.error(f"Error in hardware monitoring: {e}")
                 time.sleep(1)
 
+    def connect_esp32(self) -> None:
+        """
+        Attempt to connect to the ESP32 controller via USB.
+        Automatically detects the correct port.
+        """
+        with self.connection_lock:  # Ensure thread-safe connection handling
+            selected_port = self.get_esp32_port() or SERIAL_PORT
+            
+            if not self.check_usb_permissions(selected_port):
+                logging.error(f"USB permission issues detected for {selected_port}. Connection aborted.")
+                self.connected = False
+                self.gate_state = GateState.ERROR
+                self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
+                return
+
+            # Close existing connection if any
+            if self.serial is not None:
+                try:
+                    if self.serial.is_open:
+                        self.serial.close()
+                    self.serial = None
+                except Exception as e:
+                    logging.warning(f"Error closing existing serial connection: {e}")
+
+            try:
+                logging.info(f"Attempting to connect to ESP32 on {selected_port} at {self.config.baud_rate} baud...")
+                
+                # Create new serial connection with explicit settings
+                self.serial = serial.Serial(
+                    port=selected_port,
+                    baudrate=self.config.baud_rate,
+                    bytesize=serial.EIGHTBITS,
+                    parity=serial.PARITY_NONE,
+                    stopbits=serial.STOPBITS_ONE,
+                    timeout=self.config.serial_timeout,
+                    write_timeout=self.config.serial_timeout,
+                    inter_byte_timeout=0.1
+                )
+                
+                # Reset the device
+                self.serial.setDTR(False)
+                time.sleep(0.1)
+                self.serial.setDTR(True)
+                time.sleep(1.5)  # Give ESP32 time to reset and initialize
+                
+                # Clear any pending data
+                self.serial.reset_input_buffer()
+                self.serial.reset_output_buffer()
+
+                # Test connection with PING
+                response = self.send_command("PING", response_timeout=1.0)
+                if response and (str(response).upper() == "PONG" or str(response).upper() == "ACK:PING"):
+                    self.connected = True
+                    self.port_info = selected_port
+                    self.reconnect_attempts = 0
+                    logging.info(f"Successfully connected to ESP32 on {selected_port}.")
+                    return
+                else:
+                    logging.warning(f"ESP32 on {selected_port} did not respond to PING as expected (Got: '{response}').")
+                    if self.serial: 
+                        self.serial.close()
+                        self.serial = None
+                    self.connected = False
+            
+            except serial.SerialException as e:
+                logging.error(f"SerialException on port {selected_port}: {e}")
+                if "Permission denied" in str(e):
+                    logging.error("Ensure user has permissions for serial port (e.g., member of 'dialout' group).")
+                if self.serial and self.serial.is_open: 
+                    self.serial.close()
+                    self.serial = None
+                self.connected = False
+            except Exception as e:
+                logging.error(f"Unexpected error connecting to ESP32 on {selected_port}: {e}")
+                if self.serial and self.serial.is_open: 
+                    self.serial.close()
+                    self.serial = None
+                self.connected = False
+
+            if not self.connected:
+                self.gate_state = GateState.ERROR
+                self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
+                self.actual_lock_state = "UNKNOWN"
+                self.status_queue.put(f"UPDATE:LOCK_STATE:{self.actual_lock_state}")
+
     def send_command(self, command: str, response_timeout: Optional[float] = None) -> Union[str, bool]:
         """
         Send a command to the ESP32 controller with timeout.
@@ -401,40 +487,51 @@ class ESP32Controller:
         Returns:
             Union[str, bool]: Response string if timeout specified, True if command sent successfully
         """
-        if not self.connected or self.serial is None:
-            logging.warning(f"ESP32 not connected. Cannot send command: {command}")
-            return False
-        
-        try:
-            # Clear input buffer before sending command if expecting a direct response
-            if response_timeout is not None:
-                self.serial.reset_input_buffer()
-
-            self.serial.write(f"{command}\n".encode('utf-8'))
-            logging.debug(f"Sent to ESP32: {command}")
-            self.last_command_time = time.time()
-
-            if response_timeout:
-                start_time = time.time()
-                while time.time() - start_time < response_timeout:
-                    if self.serial.in_waiting:
-                        response = self.serial.readline().decode('utf-8').strip()
-                        if response:
-                            logging.debug(f"Direct response for {command}: {response}")
-                            return response
-                    time.sleep(0.01)
-                logging.warning(f"Timeout waiting for direct response to command: {command}")
+        with self.connection_lock:  # Ensure thread-safe command sending
+            if not self.connected or self.serial is None or not self.serial.is_open:
+                logging.warning(f"ESP32 not connected. Cannot send command: {command}")
                 return False
-            return True
-        except serial.SerialException as e:
-            logging.error(f"SerialException sending command '{command}': {e}")
-            self.connected = False
-            self.gate_state = GateState.ERROR
-            self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
-            return False
-        except Exception as e:
-            logging.error(f"Unexpected error sending command '{command}': {e}")
-            return False
+            
+            try:
+                # Clear input buffer before sending command if expecting a direct response
+                if response_timeout is not None:
+                    self.serial.reset_input_buffer()
+
+                # Ensure command ends with newline
+                if not command.endswith('\n'):
+                    command = f"{command}\n"
+
+                # Send command
+                self.serial.write(command.encode('utf-8'))
+                self.serial.flush()  # Ensure command is sent
+                logging.debug(f"Sent to ESP32: {command.strip()}")
+                self.last_command_time = time.time()
+
+                if response_timeout:
+                    start_time = time.time()
+                    while time.time() - start_time < response_timeout:
+                        if self.serial.in_waiting:
+                            try:
+                                response = self.serial.readline().decode('utf-8').strip()
+                                if response:
+                                    logging.debug(f"Direct response for {command.strip()}: {response}")
+                                    return response
+                            except UnicodeDecodeError:
+                                logging.warning("Received invalid UTF-8 data from ESP32")
+                                continue
+                        time.sleep(0.01)
+                    logging.warning(f"Timeout waiting for direct response to command: {command.strip()}")
+                    return False
+                return True
+            except serial.SerialException as e:
+                logging.error(f"SerialException sending command '{command.strip()}': {e}")
+                self.connected = False
+                self.gate_state = GateState.ERROR
+                self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
+                return False
+            except Exception as e:
+                logging.error(f"Unexpected error sending command '{command.strip()}': {e}")
+                return False
 
     def emergency_stop(self):
         """
@@ -509,65 +606,6 @@ class ESP32Controller:
             logging.error(f"Error checking USB permissions: {e}")
             return False
 
-    def connect_esp32(self):
-        """
-        Attempt to connect to the ESP32 controller via USB.
-        Automatically detects the correct port.
-        """
-        selected_port = self.get_esp32_port() or SERIAL_PORT
-        
-        if not self.check_usb_permissions(selected_port):
-            logging.error(f"USB permission issues detected for {selected_port}. Connection aborted.")
-            self.connected = False
-            self.gate_state = GateState.ERROR
-            self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
-            return
-
-        if self.serial and self.serial.is_open:
-            logging.info("Serial port already open. Closing before reconnecting.")
-            self.serial.close()
-            self.serial = None
-
-        try:
-            logging.info(f"Attempting to connect to ESP32 on {selected_port} at {self.config.baud_rate} baud...")
-            self.serial = serial.Serial(
-                port=selected_port,
-                baudrate=self.config.baud_rate,
-                timeout=self.config.serial_timeout,
-                write_timeout=self.config.serial_timeout
-            )
-            time.sleep(1.5)  # Give ESP32/Serial time to settle
-
-            # Test connection with PING
-            response = self.send_command("PING", response_timeout=1.0)
-            if response and (str(response).upper() == "PONG" or str(response).upper() == "ACK:PING"):
-                self.connected = True
-                self.port_info = selected_port
-                self.reconnect_attempts = 0
-                logging.info(f"Successfully connected to ESP32 on {selected_port}.")
-                return
-            else:
-                logging.warning(f"ESP32 on {selected_port} did not respond to PING as expected (Got: '{response}').")
-                if self.serial: self.serial.close()
-                self.connected = False
-        
-        except serial.SerialException as e:
-            logging.error(f"SerialException on port {selected_port}: {e}")
-            if "Permission denied" in str(e):
-                logging.error("Ensure user has permissions for serial port (e.g., member of 'dialout' group).")
-            if self.serial and self.serial.is_open: self.serial.close()
-            self.connected = False
-        except Exception as e:
-            logging.error(f"Unexpected error connecting to ESP32 on {selected_port}: {e}")
-            if self.serial and self.serial.is_open: self.serial.close()
-            self.connected = False
-
-        if not self.connected:
-            self.gate_state = GateState.ERROR
-            self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
-            self.actual_lock_state = "UNKNOWN"
-            self.status_queue.put(f"UPDATE:LOCK_STATE:{self.actual_lock_state}")
-
     def monitor_connection(self):
         """
         Monitor USB connection status and handle reconnection.
@@ -593,7 +631,7 @@ class ESP32Controller:
                     else:
                         # Verify connection is still active
                         try:
-                            if not self.send_command("PING"):
+                            if not self.send_command("PING", response_timeout=1.0):
                                 raise Exception("Failed to send ping command")
                             response = self.serial.readline().decode().strip()
                             if not response:
