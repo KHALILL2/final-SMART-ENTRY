@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 2.8
+Version: 2.9
 """
 
 import time
@@ -486,31 +486,46 @@ class ESP32Controller:
 
                 # Test connection with a simple command
                 logging.info("Testing connection with LED command...")
-                response = self.send_command("LED:GREEN", response_timeout=2.0)
-                if response and "Green LED on" in response:
-                    self.connected = True
-                    self.port_info = selected_port
-                    self.reconnect_attempts = 0
-                    logging.info(f"Successfully connected to ESP32 on {selected_port}")
-                    return
-                else:
-                    logging.warning(f"ESP32 on {selected_port} did not respond as expected (Got: '{response}')")
-                    if self.serial: 
-                        self.serial.close()
-                        self.serial = None
-                    self.connected = False
+                self.serial.write(b"LED:GREEN\n")
+                self.serial.flush()
+                
+                # Wait for response
+                response_timeout = 2.0
+                response_start_time = time.time()
+                while time.time() - response_start_time < response_timeout:
+                    if self.serial.in_waiting:
+                        try:
+                            response = self.serial.readline().decode('utf-8').strip()
+                            if response:
+                                logging.info(f"ESP32 response to LED command: {response}")
+                                if "STATUS:LED:GREEN_ON" in response:
+                                    self.connected = True
+                                    self.port_info = selected_port
+                                    self.reconnect_attempts = 0
+                                    logging.info(f"Successfully connected to ESP32 on {selected_port}")
+                                    return
+                        except UnicodeDecodeError:
+                            logging.warning("Received invalid UTF-8 data in response")
+                            continue
+                    time.sleep(0.1)
+                
+                logging.warning("No valid response received to LED command")
+                if self.serial:
+                    self.serial.close()
+                    self.serial = None
+                self.connected = False
             
             except serial.SerialException as e:
                 logging.error(f"SerialException on port {selected_port}: {e}")
                 if "Permission denied" in str(e):
                     logging.error("Ensure user has permissions for serial port (e.g., member of 'dialout' group).")
-                if self.serial and self.serial.is_open: 
+                if self.serial and self.serial.is_open:
                     self.serial.close()
                     self.serial = None
                 self.connected = False
             except Exception as e:
                 logging.error(f"Unexpected error connecting to ESP32 on {selected_port}: {e}")
-                if self.serial and self.serial.is_open: 
+                if self.serial and self.serial.is_open:
                     self.serial.close()
                     self.serial = None
                 self.connected = False
@@ -547,9 +562,9 @@ class ESP32Controller:
                     command = f"{command}\n"
 
                 # Send command
+                logging.debug(f"Sending command to ESP32: {command.strip()}")
                 self.serial.write(command.encode('utf-8'))
                 self.serial.flush()  # Ensure command is sent
-                logging.debug(f"Sent to ESP32: {command.strip()}")
                 self.last_command_time = time.time()
 
                 if response_timeout:
@@ -559,13 +574,13 @@ class ESP32Controller:
                             try:
                                 response = self.serial.readline().decode('utf-8').strip()
                                 if response:
-                                    logging.debug(f"Direct response for {command.strip()}: {response}")
+                                    logging.debug(f"Received response from ESP32: {response}")
                                     return response
                             except UnicodeDecodeError:
                                 logging.warning("Received invalid UTF-8 data from ESP32")
                                 continue
                         time.sleep(0.01)
-                    logging.warning(f"Timeout waiting for direct response to command: {command.strip()}")
+                    logging.warning(f"Timeout waiting for response to command: {command.strip()}")
                     return False
                 return True
             except serial.SerialException as e:
