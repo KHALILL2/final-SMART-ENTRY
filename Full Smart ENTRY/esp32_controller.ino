@@ -407,7 +407,7 @@ void sendLockStatus() {
   Serial.println(currentLockState == LOCKED ? "LOCKED" : "UNLOCKED");
 }
 
-void updateGateState() {
+void updateGateState(GateState newState = currentGateState) {
   // Check if gate movement has timed out
   if ((currentGateState == OPENING || currentGateState == CLOSING) && 
       (millis() - lastGateMove > GATE_MOVE_TIMEOUT_MS)) {
@@ -416,19 +416,24 @@ void updateGateState() {
     return;
   }
   
-  // Update gate state based on sensor readings
-  if (currentGateState == OPENING) {
-    if (digitalRead(GATE_SENSOR_PIN_OPEN) == HIGH) {
-      currentGateState = OPEN;
-      isGateOpen = true;
-      Serial.println("GATE:OPEN");
+  // Update gate state if it's different
+  if (currentGateState != newState) {
+    currentGateState = newState;
+    
+    // Update gate state based on sensor readings
+    if (currentGateState == OPENING) {
+      if (digitalRead(GATE_SENSOR_PIN_OPEN) == HIGH) {
+        currentGateState = OPEN;
+        isGateOpen = true;
+        Serial.println("GATE:OPEN");
+      }
     }
-  }
-  else if (currentGateState == CLOSING) {
-    if (digitalRead(GATE_SENSOR_PIN_CLOSED) == HIGH) {
-      currentGateState = CLOSED;
-      isGateOpen = false;
-      Serial.println("GATE:CLOSED");
+    else if (currentGateState == CLOSING) {
+      if (digitalRead(GATE_SENSOR_PIN_CLOSED) == HIGH) {
+        currentGateState = CLOSED;
+        isGateOpen = false;
+        Serial.println("GATE:CLOSED");
+      }
     }
   }
 }
