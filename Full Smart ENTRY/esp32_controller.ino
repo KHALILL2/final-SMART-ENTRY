@@ -68,7 +68,7 @@ enum SensorState {
 };
 
 // Function prototypes
-void updateGateState(GateState newState = currentGateState);
+void updateGateState(GateState newState);
 void updateLockState(LockState newState);
 void sendGateStatus();
 void sendSensorStatus();
@@ -194,7 +194,7 @@ void loop() {
   }
   
   // Update gate state based on sensor readings
-  updateGateState();
+  updateGateState(currentGateState);
   
   // Check for unauthorized access
   checkUnauthorizedAccess();
@@ -423,7 +423,7 @@ void sendLockStatus() {
   Serial.println(currentLockState == LOCKED ? "LOCKED" : "UNLOCKED");
 }
 
-void updateGateState(GateState newState = currentGateState) {
+void updateGateState(GateState newState) {
   // Check if gate movement has timed out
   if ((currentGateState == OPENING || currentGateState == CLOSING) && 
       (millis() - lastGateMove > GATE_MOVE_TIMEOUT_MS)) {
