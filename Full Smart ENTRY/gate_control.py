@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 2.9
+Version: 3.0
 """
 
 import time
@@ -343,20 +343,6 @@ class ESP32Controller:
         self.command_timeout = 5.0
         self.connection_lock = threading.Lock()  # Add lock for thread-safe connection handling
 
-        # Start monitoring threads
-        self.running = True
-        self.start_monitoring_threads()
-        
-        # Initial connection attempt
-        self.connect_esp32()
-        if self.connected:
-            logging.info("Requesting initial status from ESP32...")
-            self.send_command("GATE:STATUS")
-        else:
-            logging.warning("Initial ESP32 connection failed. System will attempt to reconnect automatically.")
-            self.gate_state = GateState.ERROR
-            self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
-
         # Add diagnostic flags
         self.last_error = None
         self.connection_diagnostics = {
@@ -374,6 +360,20 @@ class ESP32Controller:
             'last_verified': None,
             'is_compatible': False
         }
+
+        # Start monitoring threads
+        self.running = True
+        self.start_monitoring_threads()
+        
+        # Initial connection attempt
+        self.connect_esp32()
+        if self.connected:
+            logging.info("Requesting initial status from ESP32...")
+            self.send_command("GATE:STATUS")
+        else:
+            logging.warning("Initial ESP32 connection failed. System will attempt to reconnect automatically.")
+            self.gate_state = GateState.ERROR
+            self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
 
     def start_monitoring_threads(self):
         """
@@ -503,6 +503,8 @@ class ESP32Controller:
                                     self.port_info = selected_port
                                     self.reconnect_attempts = 0
                                     logging.info(f"Successfully connected to ESP32 on {selected_port}")
+                                    # Verify firmware after successful connection
+                                    self.verify_firmware()
                                     return
                         except UnicodeDecodeError:
                             logging.warning("Received invalid UTF-8 data in response")
@@ -910,7 +912,7 @@ class ESP32Controller:
         try:
             # Request firmware version
             response = self.send_command("VERSION", response_timeout=1.0)
-            if response:
+            if response and "VERSION:" in response:
                 try:
                     # Expected format: "VERSION:x.y.z"
                     version = response.split(':')[1]
@@ -921,7 +923,7 @@ class ESP32Controller:
 
             # Request protocol version
             response = self.send_command("PROTOCOL", response_timeout=1.0)
-            if response:
+            if response and "PROTOCOL:" in response:
                 try:
                     # Expected format: "PROTOCOL:x.y"
                     protocol = response.split(':')[1]
@@ -1747,15 +1749,15 @@ class GateControlSystem:
         Sets up NFC reader and ESP32 controller.
         """
         # Load configuration
-        config_manager = ConfigurationManager()
-        security_config = config_manager.get_security_config()
-        hardware_config = config_manager.get_hardware_config()
+        self.config_manager = ConfigurationManager()
+        self.security_config = self.config_manager.get_security_config()
+        self.hardware_config = self.config_manager.get_hardware_config()
         
         # Initialize security manager
-        self.security_manager = SecurityManager(security_config)
+        self.security_manager = SecurityManager(self.security_config)
         
         # Initialize ESP32 controller
-        self.esp32 = ESP32Controller(hardware_config)
+        self.esp32 = ESP32Controller(self.hardware_config)
         
         # Initialize card manager
         self.card_manager = CardManager()
@@ -1774,7 +1776,7 @@ class GateControlSystem:
         self.is_gate_open = False
         self.is_occupied = False
         self.last_card_time = 0.0
-        self.card_cooldown = security_config.card_cooldown
+        self.card_cooldown = self.security_config.card_cooldown
         self.last_card_id: Optional[str] = None
         self.system_ready = False
         
@@ -1809,20 +1811,60 @@ class GateControlSystem:
             logging.error(f"Error during system initialization: {e}")
             self.system_ready = False
 
-    def send_command(self, command: str) -> bool:
+    def run(self) -> None:
         """
-        Send a command to the ESP32 controller.
-        
-        Args:
-            command (str): The command to send
+        Main system loop.
+        Continuously monitors for NFC cards and processes them.
+        """
+        logging.info("Starting gate control system")
+        try:
+            while True:
+                # Check for status updates from ESP32
+                try:
+                    status = self.esp32.status_queue.get_nowait()
+                    if "OCCUPIED" in status:
+                        self.is_occupied = True
+                    elif "CLEAR" in status:
+                        self.is_occupied = False
+                        if self.is_gate_open:
+                            self.close_gate()
+                    elif "UNAUTHORIZED" in status:
+                        self.handle_unauthorized_access()
+                except queue.Empty:
+                    pass
+
+                # Check for NFC cards
+                card_id = self.read_nfc()
+                if card_id:
+                    self.handle_card(card_id)
+                
+                time.sleep(0.05)
+
+        except KeyboardInterrupt:
+            logging.info("Shutting down system")
+            self.cleanup()
+        except Exception as e:
+            logging.error(f"Error in main system loop: {e}")
+            self.cleanup()
+
+    def cleanup(self) -> None:
+        """
+        Clean up system resources.
+        """
+        try:
+            # Close gate and lock it
+            if self.is_gate_open:
+                self.close_gate()
             
-        Returns:
-            bool: True if command was sent successfully
-        """
-        if not self.system_ready:
-            logging.warning("System not ready, cannot send command")
-            return False
-        return self.esp32.send_command(command)
+            # Clean up ESP32 connection
+            self.esp32.cleanup()
+            
+            # Save any pending data
+            self.card_manager.save_cards()
+            
+            logging.info("System cleanup completed")
+        except Exception as e:
+            logging.error(f"Error during system cleanup: {e}")
 
     def read_nfc(self) -> Optional[str]:
         """
@@ -1844,59 +1886,6 @@ class GateControlSystem:
         except Exception as e:
             logging.error(f"Error reading NFC: {e}")
             return None
-
-    def open_gate(self) -> bool:
-        """
-        Open the gate via ESP32 controller.
-        Includes unlocking mechanism.
-        
-        Returns:
-            bool: True if gate was opened successfully
-        """
-        if not self.system_ready:
-            logging.warning("System not ready, cannot open gate")
-            return False
-            
-        if not self.is_gate_open:
-            logging.info("Opening gate")
-            try:
-                # Unlock the gate mechanism first
-                self.esp32.unlock_gate()
-                time.sleep(0.5)  # Wait for lock to disengage
-                
-                if self.send_command("GATE:OPEN"):
-                    self.is_gate_open = True
-                    self.send_command("LED:GREEN")
-                    self.send_command("BUZZER:GREEN")
-                    return True
-            except Exception as e:
-                logging.error(f"Error opening gate: {e}")
-        return False
-
-    def close_gate(self) -> bool:
-        """
-        Close the gate via ESP32 controller.
-        Includes locking mechanism.
-        
-        Returns:
-            bool: True if gate was closed successfully
-        """
-        if not self.system_ready:
-            logging.warning("System not ready, cannot close gate")
-            return False
-            
-        if self.is_gate_open:
-            logging.info("Closing gate")
-            try:
-                if self.send_command("GATE:CLOSE"):
-                    self.is_gate_open = False
-                    # Lock the gate mechanism after closing
-                    time.sleep(0.5)  # Wait for gate to close
-                    self.esp32.lock_gate()
-                    return True
-            except Exception as e:
-                logging.error(f"Error closing gate: {e}")
-        return False
 
     def handle_card(self, card_id: str) -> None:
         """
@@ -1962,61 +1951,6 @@ class GateControlSystem:
         except Exception as e:
             logging.error(f"Error handling unauthorized access: {e}")
 
-    def run(self) -> None:
-        """
-        Main system loop.
-        Continuously monitors for NFC cards and processes them.
-        """
-        logging.info("Starting gate control system")
-        try:
-            while True:
-                # Check for status updates from ESP32
-                try:
-                    status = self.esp32.status_queue.get_nowait()
-                    if "OCCUPIED" in status:
-                        self.is_occupied = True
-                    elif "CLEAR" in status:
-                        self.is_occupied = False
-                        if self.is_gate_open:
-                            self.close_gate()
-                    elif "UNAUTHORIZED" in status:
-                        self.handle_unauthorized_access()
-                except queue.Empty:
-                    pass
-
-                # Check for NFC cards
-                card_id = self.read_nfc()
-                if card_id:
-                    self.handle_card(card_id)
-                
-                time.sleep(0.05)
-
-        except KeyboardInterrupt:
-            logging.info("Shutting down system")
-            self.cleanup()
-        except Exception as e:
-            logging.error(f"Error in main system loop: {e}")
-            self.cleanup()
-
-    def cleanup(self) -> None:
-        """
-        Clean up system resources.
-        """
-        try:
-            # Close gate and lock it
-            if self.is_gate_open:
-                self.close_gate()
-            
-            # Clean up ESP32 connection
-            self.esp32.cleanup()
-            
-            # Save any pending data
-            self.card_manager.save_cards()
-            
-            logging.info("System cleanup completed")
-        except Exception as e:
-            logging.error(f"Error during system cleanup: {e}")
-
 if __name__ == "__main__":
     try:
         # Start up our gate control system
@@ -2048,7 +1982,7 @@ if __name__ == "__main__":
         
         # Create our nice-looking interface
         root = tk.Tk()
-        app = GateControlGUI(root, gate_system.config, gate_system.esp32)
+        app = GateControlGUI(root, gate_system.hardware_config, gate_system.esp32)
         
         # Start everything in a separate thread
         system_thread = threading.Thread(target=gate_system.run)
