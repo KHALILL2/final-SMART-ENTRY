@@ -60,6 +60,20 @@ enum LockState {
 };
 LockState currentLockState = LOCKED;
 
+// Sensor States
+enum SensorState {
+  SENSOR_OK,
+  SENSOR_ERROR,
+  SENSOR_TIMEOUT
+};
+
+// Sensor status tracking
+SensorState gateSensorState = SENSOR_OK;
+SensorState irSensorState = SENSOR_OK;
+SensorState occupancySensorState = SENSOR_OK;
+unsigned long lastSensorCheck = 0;
+const unsigned long SENSOR_CHECK_INTERVAL = 5000; // Check sensors every 5 seconds
+
 void setup() {
   // Initialize Serial communication
   Serial.begin(115200);
@@ -115,24 +129,59 @@ void setup() {
 }
 
 void loop() {
-  // Check for serial commands
+  // Check sensors periodically
+  checkSensors();
+  
+  // Process serial commands
   if (stringComplete) {
-    handleCommand(inputString);
+    String command = inputString;
     inputString = "";
     stringComplete = false;
+    
+    if (command == "GATE:STATUS") {
+      Serial.print("GATE:STATUS:");
+      Serial.println(currentGateState);
+    }
+    else if (command == "SENSOR:STATUS") {
+      sendSensorStatus();
+    }
+    else if (command == "LOCK:STATUS") {
+      sendLockStatus();
+    }
+    else if (command == "OPEN") {
+      openGate();
+    }
+    else if (command == "CLOSE") {
+      closeGate();
+    }
+    else if (command == "LOCK") {
+      lockGate();
+    }
+    else if (command == "UNLOCK") {
+      unlockGate();
+    }
+    else if (command == "LED:GREEN") {
+      digitalWrite(LED_GREEN_PIN, HIGH);
+      digitalWrite(LED_RED_PIN, LOW);
+    }
+    else if (command == "LED:RED") {
+      digitalWrite(LED_GREEN_PIN, LOW);
+      digitalWrite(LED_RED_PIN, HIGH);
+    }
+    else if (command == "BUZZER:RED") {
+      ledc_set_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL, 128);
+      ledc_update_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL);
+      delay(500);
+      ledc_set_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL, 0);
+      ledc_update_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL);
+    }
   }
   
-  // Check gate sensor
-  checkGateSensor();
+  // Update gate state based on sensor readings
+  updateGateState();
   
-  // Check IR sensor for unauthorized access
-  checkIRSensor();
-  
-  // Handle gate movement
-  handleGateMovement();
-  
-  // Handle lock mechanism
-  handleLock();
+  // Check for unauthorized access
+  checkUnauthorizedAccess();
   
   // Small delay to prevent CPU hogging
   delay(10);
@@ -310,51 +359,89 @@ void emergencyStop() {
   Serial.println("EMERGENCY:STOPPED");
 }
 
-void checkGateSensor() {
-  bool currentOccupied = digitalRead(GATE_SENSOR_PIN_OPEN) == LOW || digitalRead(GATE_SENSOR_PIN_CLOSED) == LOW;
-  if (currentOccupied != isOccupied) {
-    isOccupied = currentOccupied;
-    Serial.println(isOccupied ? "STATUS:OCCUPIED" : "STATUS:CLEAR");
-  }
-}
-
-void checkIRSensor() {
-  if (digitalRead(IR_SENSOR_PIN) == LOW && !isOccupied) {
-    Serial.println("ALARM:UNAUTHORIZED");
-  }
-}
-
-void handleGateMovement() {
-  if (currentGateState == OPENING || currentGateState == CLOSING) {
-    if (millis() - lastGateMove > GATE_MOVE_TIME) {
-      if (currentGateState == OPENING) {
-        updateGateState(OPEN);
-      } else {
-        updateGateState(CLOSED);
-        lockGate();  // Auto-lock when closed
-      }
+void checkSensors() {
+  unsigned long currentTime = millis();
+  if (currentTime - lastSensorCheck >= SENSOR_CHECK_INTERVAL) {
+    lastSensorCheck = currentTime;
+    
+    // Check gate sensor
+    int gateSensorValue = digitalRead(GATE_SENSOR_PIN_OPEN);
+    if (gateSensorValue == HIGH) {
+      gateSensorState = SENSOR_OK;
+    } else {
+      gateSensorState = SENSOR_ERROR;
+      Serial.println("SENSOR:ERROR:GATE");
+    }
+    
+    // Check IR sensor
+    int irSensorValue = digitalRead(IR_SENSOR_PIN);
+    if (irSensorValue != 0) { // Assuming 0 means error
+      irSensorState = SENSOR_OK;
+    } else {
+      irSensorState = SENSOR_ERROR;
+      Serial.println("SENSOR:ERROR:IR");
+    }
+    
+    // Check occupancy sensor
+    int occupancyValue = digitalRead(OCCUPANCY_SENSOR_PIN);
+    if (occupancyValue != 0) { // Assuming 0 means error
+      occupancySensorState = SENSOR_OK;
+    } else {
+      occupancySensorState = SENSOR_ERROR;
+      Serial.println("SENSOR:ERROR:OCCUPANCY");
     }
   }
 }
 
-void handleLock() {
-  if (!isGateOpen && !isLocked && (millis() - lastLockTime > SOLENOID_ACTION_TIME_MS)) {
-    lockGate();
+void sendSensorStatus() {
+  Serial.print("SENSOR:STATUS:");
+  Serial.print(gateSensorState == SENSOR_OK ? "OK" : "ERROR");
+  Serial.print(",");
+  Serial.print(irSensorState == SENSOR_OK ? "OK" : "ERROR");
+  Serial.print(",");
+  Serial.println(occupancySensorState == SENSOR_OK ? "OK" : "ERROR");
+}
+
+void sendLockStatus() {
+  Serial.print("LOCK:STATUS:");
+  Serial.println(currentLockState == LOCKED ? "LOCKED" : "UNLOCKED");
+}
+
+void updateGateState() {
+  // Check if gate movement has timed out
+  if ((currentGateState == OPENING || currentGateState == CLOSING) && 
+      (millis() - lastGateMove > GATE_MOVE_TIMEOUT_MS)) {
+    currentGateState = ERROR_STATE;
+    Serial.println("GATE:ERROR:TIMEOUT");
+    return;
+  }
+  
+  // Update gate state based on sensor readings
+  if (currentGateState == OPENING) {
+    if (digitalRead(GATE_SENSOR_PIN_OPEN) == HIGH) {
+      currentGateState = OPEN;
+      isGateOpen = true;
+      Serial.println("GATE:OPEN");
+    }
+  }
+  else if (currentGateState == CLOSING) {
+    if (digitalRead(GATE_SENSOR_PIN_CLOSED) == HIGH) {
+      currentGateState = CLOSED;
+      isGateOpen = false;
+      Serial.println("GATE:CLOSED");
+    }
   }
 }
 
-void updateGateState(GateState newState) {
-  if (currentGateState != newState) {
-    currentGateState = newState;
-    String stateStr;
-    switch (currentGateState) {
-      case CLOSED: stateStr = "CLOSED"; break;
-      case OPENING: stateStr = "OPENING"; break;
-      case OPEN: stateStr = "OPEN"; break;
-      case CLOSING: stateStr = "CLOSING"; break;
-      case ERROR_STATE: stateStr = "ERROR"; break;
+void checkUnauthorizedAccess() {
+  if (irSensorState == SENSOR_OK && digitalRead(IR_SENSOR_PIN) == LOW) {
+    if (!unauthorizedDetected) {
+      unauthorizedDetected = true;
+      Serial.println("UNAUTHORIZED:DETECTED");
+      triggerUnauthorizedAlarm();
     }
-    Serial.println("STATUS:GATE:" + stateStr);
+  } else {
+    unauthorizedDetected = false;
   }
 }
 
@@ -381,24 +468,6 @@ void sendGateStatus() {
     case ERROR_STATE: stateStr = "ERROR"; break;
   }
   Serial.println("GATE_STATUS:" + stateStr);
-}
-
-void sendLockStatus() {
-  String stateStr;
-  switch (currentLockState) {
-    case LOCKED: stateStr = "LOCKED"; break;
-    case UNLOCKED: stateStr = "UNLOCKED"; break;
-    case LOCK_ERROR: stateStr = "ERROR"; break;
-  }
-  Serial.println("LOCK_STATUS:" + stateStr);
-}
-
-void sendSensorStatus() {
-  Serial.print("SENSOR_STATUS:");
-  Serial.print("GATE=");
-  Serial.print(isOccupied ? "OCCUPIED" : "CLEAR");
-  Serial.print(",IR=");
-  Serial.println(digitalRead(IR_SENSOR_PIN) == LOW ? "TRIGGERED" : "CLEAR");
 }
 
 void signalBuzzer(String type) {
