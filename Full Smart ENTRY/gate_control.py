@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 3.4
+Version: 3.5
 """
 
 import time
@@ -340,6 +340,13 @@ class ESP32Controller:
         self.last_connection_check = time.time()
         self.reconnect_attempts = 0
         self.connection_status = "Disconnected"
+        self.last_error = None
+        self.connection_diagnostics = {
+            'port_found': False,
+            'permissions_ok': False,
+            'connection_attempted': False,
+            'last_error': None
+        }
         
         # Start monitoring threads
         self.running = True
@@ -384,23 +391,46 @@ class ESP32Controller:
                 time.sleep(1)
 
     def connect_esp32(self) -> None:
-        """Connect to ESP32 controller."""
+        """Connect to ESP32 controller with improved error handling."""
         with self.connection_lock:
             try:
+                # Reset connection state
+                self.connected = False
+                self.connection_status = "Connecting..."
+                
                 # Find ESP32 port
                 port = self.get_esp32_port()
                 if not port:
-                    logging.error("No ESP32 device found")
                     self.connection_status = "No device found"
+                    self.last_error = "No ESP32 device found"
+                    logging.error("No ESP32 device found")
                     return
                 
-                # Create serial connection
-                self.serial = serial.Serial(
-                    port=port,
-                    baudrate=self.config.baud_rate,
-                    timeout=self.config.serial_timeout,
-                    write_timeout=self.config.serial_timeout
-                )
+                # Check USB permissions
+                if not self.check_usb_permissions(port):
+                    self.connection_status = "Permission error"
+                    self.last_error = "USB permission error"
+                    logging.error("USB permission error")
+                    return
+                
+                # Close existing connection if any
+                if self.serial and self.serial.is_open:
+                    self.serial.close()
+                
+                # Create serial connection with retry
+                for attempt in range(3):
+                    try:
+                        self.serial = serial.Serial(
+                            port=port,
+                            baudrate=self.config.baud_rate,
+                            timeout=self.config.serial_timeout,
+                            write_timeout=self.config.serial_timeout
+                        )
+                        break
+                    except serial.SerialException as e:
+                        if attempt == 2:  # Last attempt
+                            raise
+                        time.sleep(0.5)
                 
                 # Reset the device
                 self.serial.setDTR(False)
@@ -412,7 +442,7 @@ class ESP32Controller:
                 self.serial.reset_input_buffer()
                 self.serial.reset_output_buffer()
                 
-                # Wait for startup message
+                # Wait for startup message with timeout
                 start_time = time.time()
                 while time.time() - start_time < 2.0:
                     if self.serial.in_waiting:
@@ -421,6 +451,8 @@ class ESP32Controller:
                             if "SYSTEM:READY" in line:
                                 self.connected = True
                                 self.connection_status = "Connected"
+                                self.reconnect_attempts = 0
+                                self.last_error = None
                                 logging.info("ESP32 connected successfully")
                                 # Turn off LED after connection
                                 self.send_command("LED:OFF")
@@ -429,21 +461,24 @@ class ESP32Controller:
                             continue
                     time.sleep(0.1)
                 
-                logging.error("No startup message received from ESP32")
+                # If we get here, connection failed
                 self.connection_status = "No response"
+                self.last_error = "No startup message received"
+                logging.error("No startup message received from ESP32")
                 if self.serial:
                     self.serial.close()
                     self.serial = None
                 
             except Exception as e:
-                logging.error(f"Error connecting to ESP32: {e}")
                 self.connection_status = f"Error: {str(e)}"
+                self.last_error = str(e)
+                logging.error(f"Error connecting to ESP32: {e}")
                 if self.serial:
                     self.serial.close()
                     self.serial = None
 
     def send_command(self, command: str, response_timeout: Optional[float] = None) -> Union[str, bool]:
-        """Send a command to the ESP32 controller."""
+        """Send a command to the ESP32 controller with improved error handling."""
         with self.connection_lock:
             if not self.connected or not self.serial or not self.serial.is_open:
                 logging.warning(f"ESP32 not connected. Cannot send command: {command}")
@@ -458,10 +493,18 @@ class ESP32Controller:
                 if not command.endswith('\n'):
                     command = f"{command}\n"
                 
-                # Send command
+                # Send command with retry
+                for attempt in range(3):
+                    try:
+                        self.serial.write(command.encode('utf-8'))
+                        self.serial.flush()
+                        break
+                    except serial.SerialException as e:
+                        if attempt == 2:  # Last attempt
+                            raise
+                        time.sleep(0.1)
+                
                 logging.info(f"Sending command to ESP32: {command.strip()}")
-                self.serial.write(command.encode('utf-8'))
-                self.serial.flush()
                 
                 if response_timeout:
                     start_time = time.time()
@@ -483,6 +526,10 @@ class ESP32Controller:
                 logging.error(f"Error sending command '{command.strip()}': {e}")
                 self.connected = False
                 self.connection_status = f"Error: {str(e)}"
+                self.last_error = str(e)
+                if self.serial:
+                    self.serial.close()
+                    self.serial = None
                 return False
 
     def emergency_stop(self):
@@ -570,7 +617,7 @@ class ESP32Controller:
             return False
 
     def monitor_connection(self):
-        """Monitor USB connection status and handle reconnection."""
+        """Monitor USB connection status with improved error handling."""
         while self.running:
             try:
                 current_time = time.time()
@@ -584,22 +631,42 @@ class ESP32Controller:
                             self.connect_esp32()
                             self.reconnect_attempts += 1
                         else:
-                            self.connection_status = "Connection failed"
-                            logging.error("Max reconnection attempts reached")
+                            self.connection_status = f"Connection failed: {self.last_error}"
+                            logging.error(f"Max reconnection attempts reached. Last error: {self.last_error}")
                     else:
                         # Verify connection is still active
                         try:
-                            if not self.send_command("PING", response_timeout=1.0):
-                                raise Exception("Failed to send ping command")
-                            response = self.serial.readline().decode().strip()
-                            if not response:
-                                raise Exception("No response from ESP32")
-                            self.connection_status = "Connected"
-                        except:
-                            logging.warning("Lost connection to ESP32")
+                            if not self.serial or not self.serial.is_open:
+                                raise Exception("Serial port not open")
+                            
+                            # Send ping command
+                            self.serial.write(b"PING\n")
+                            self.serial.flush()
+                            
+                            # Wait for response
+                            start_time = time.time()
+                            while time.time() - start_time < 1.0:
+                                if self.serial.in_waiting:
+                                    try:
+                                        response = self.serial.readline().decode().strip()
+                                        if response:
+                                            self.connection_status = "Connected"
+                                            break
+                                    except UnicodeDecodeError:
+                                        continue
+                                time.sleep(0.01)
+                            else:
+                                raise Exception("No response to ping")
+                                
+                        except Exception as e:
+                            logging.warning(f"Lost connection to ESP32: {e}")
                             self.connected = False
-                            self.connection_status = "Disconnected"
+                            self.connection_status = f"Disconnected: {str(e)}"
+                            self.last_error = str(e)
                             self.reconnect_attempts = 0
+                            if self.serial:
+                                self.serial.close()
+                                self.serial = None
                 
                 time.sleep(1)
             except Exception as e:
