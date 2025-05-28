@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 2.3
+Version: 2.4
 """
 
 import time
@@ -356,6 +356,24 @@ class ESP32Controller:
             self.gate_state = GateState.ERROR
             self.status_queue.put(f"UPDATE:GATE_STATE:{self.gate_state.name}")
 
+        # Add diagnostic flags
+        self.last_error = None
+        self.connection_diagnostics = {
+            'port_found': False,
+            'permissions_ok': False,
+            'connection_attempted': False,
+            'ping_successful': False,
+            'last_error': None
+        }
+
+        # Add firmware verification flags
+        self.firmware_info = {
+            'version': None,
+            'protocol_version': None,
+            'last_verified': None,
+            'is_compatible': False
+        }
+
     def start_monitoring_threads(self):
         """
         Start all monitoring threads.
@@ -393,10 +411,9 @@ class ESP32Controller:
 
     def connect_esp32(self) -> None:
         """
-        Attempt to connect to the ESP32 controller via USB.
-        Automatically detects the correct port.
+        Attempt to connect to the ESP32 controller via USB with enhanced diagnostics.
         """
-        with self.connection_lock:  # Ensure thread-safe connection handling
+        with self.connection_lock:
             selected_port = self.get_esp32_port() or SERIAL_PORT
             
             if not self.check_usb_permissions(selected_port):
@@ -447,6 +464,16 @@ class ESP32Controller:
                     self.port_info = selected_port
                     self.reconnect_attempts = 0
                     logging.info(f"Successfully connected to ESP32 on {selected_port}.")
+
+                    # After successful connection, verify firmware
+                    self.verify_firmware()
+                    if not self.firmware_info['is_compatible']:
+                        logging.error("ESP32 firmware is not compatible with this system")
+                        logging.error("Please update the ESP32 firmware to the latest version")
+                        self.connected = False
+                        if self.serial:
+                            self.serial.close()
+                            self.serial = None
                     return
                 else:
                     logging.warning(f"ESP32 on {selected_port} did not respond to PING as expected (Got: '{response}').")
@@ -550,7 +577,7 @@ class ESP32Controller:
 
     def get_esp32_port(self) -> Optional[str]:
         """
-        Find the ESP32 USB port.
+        Find the ESP32 USB port with enhanced diagnostics.
         
         Returns:
             Optional[str]: The port name if found, None otherwise
@@ -567,11 +594,13 @@ class ESP32Controller:
             for port in ports:
                 logging.info(f"Device: {port.device}, Description: {port.description}, Hardware ID: {port.hwid}")
             
-            # Try to find ESP32 port
+            # Try to find ESP32 port with more detailed logging
             for port in ports:
                 # Common ESP32 USB identifiers
                 if any(identifier in str(port.description).upper() for identifier in ['CP210', 'CH340', 'SILICON LABS', 'ESP32']):
                     logging.info(f"Found potential ESP32 device: {port.device}")
+                    logging.info(f"Device details: {port.description}")
+                    logging.info(f"Hardware ID: {port.hwid}")
                     return port.device
                     
             logging.warning("No ESP32 device found. Please ensure ESP32 is connected and recognized.")
@@ -583,12 +612,21 @@ class ESP32Controller:
 
     def check_usb_permissions(self, port: str) -> bool:
         """
-        Check and fix USB permissions if needed.
+        Check and fix USB permissions with enhanced diagnostics.
         
         Returns:
             bool: True if permissions are correct
         """
         try:
+            # Check if port exists
+            if not os.path.exists(port):
+                logging.error(f"Port {port} does not exist")
+                return False
+
+            # Check port permissions
+            port_stat = os.stat(port)
+            logging.info(f"Port {port} permissions: {oct(port_stat.st_mode)}")
+            
             # Check if user is in dialout group
             result = subprocess.run(['groups'], capture_output=True, text=True)
             if 'dialout' not in result.stdout:
@@ -811,6 +849,151 @@ class ESP32Controller:
             self.send_command("ALARM:STOP")
             self.unauthorized_detected = False
             logging.info("Unauthorized access alarm stopped")
+
+    def run_diagnostics(self) -> Dict[str, Any]:
+        """
+        Run comprehensive diagnostics on the ESP32 connection.
+        
+        Returns:
+            Dict[str, Any]: Diagnostic results
+        """
+        logging.info("Running ESP32 connection diagnostics...")
+        
+        # Check USB devices
+        ports = serial.tools.list_ports.comports()
+        logging.info("Available USB devices:")
+        for port in ports:
+            logging.info(f"Device: {port.device}, Description: {port.description}, Hardware ID: {port.hwid}")
+        
+        # Check if ESP32 port is found
+        esp32_port = self.get_esp32_port()
+        self.connection_diagnostics['port_found'] = esp32_port is not None
+        
+        if esp32_port:
+            # Check permissions
+            self.connection_diagnostics['permissions_ok'] = self.check_usb_permissions(esp32_port)
+            
+            # Try to open port
+            try:
+                test_serial = serial.Serial(
+                    port=esp32_port,
+                    baudrate=self.config.baud_rate,
+                    timeout=1
+                )
+                test_serial.close()
+                self.connection_diagnostics['connection_attempted'] = True
+            except Exception as e:
+                self.connection_diagnostics['last_error'] = str(e)
+                logging.error(f"Failed to open port: {e}")
+        
+        # Try to connect if port is found
+        if self.connection_diagnostics['port_found']:
+            self.connect_esp32()
+            if self.connected:
+                # Test communication
+                response = self.send_command("PING", response_timeout=1.0)
+                self.connection_diagnostics['ping_successful'] = response and (
+                    str(response).upper() == "PONG" or 
+                    str(response).upper() == "ACK:PING"
+                )
+        
+        return self.connection_diagnostics
+
+    def verify_firmware(self) -> Dict[str, Any]:
+        """
+        Verify ESP32 firmware and protocol compatibility.
+        
+        Returns:
+            Dict[str, Any]: Firmware verification results
+        """
+        logging.info("Verifying ESP32 firmware...")
+        
+        if not self.connected or not self.serial:
+            logging.error("Cannot verify firmware: ESP32 not connected")
+            return self.firmware_info
+
+        try:
+            # Request firmware version
+            response = self.send_command("VERSION", response_timeout=1.0)
+            if response:
+                try:
+                    # Expected format: "VERSION:x.y.z"
+                    version = response.split(':')[1]
+                    self.firmware_info['version'] = version
+                    logging.info(f"ESP32 Firmware Version: {version}")
+                except:
+                    logging.warning(f"Unexpected version response format: {response}")
+
+            # Request protocol version
+            response = self.send_command("PROTOCOL", response_timeout=1.0)
+            if response:
+                try:
+                    # Expected format: "PROTOCOL:x.y"
+                    protocol = response.split(':')[1]
+                    self.firmware_info['protocol_version'] = protocol
+                    logging.info(f"ESP32 Protocol Version: {protocol}")
+                except:
+                    logging.warning(f"Unexpected protocol response format: {response}")
+
+            # Test basic commands
+            test_commands = [
+                ("PING", "PONG"),
+                ("STATUS:GATE", "STATUS"),
+                ("STATUS:LOCK", "STATUS")
+            ]
+
+            for cmd, expected_prefix in test_commands:
+                response = self.send_command(cmd, response_timeout=1.0)
+                if not response or not response.startswith(expected_prefix):
+                    logging.warning(f"Command {cmd} failed or returned unexpected response: {response}")
+                    self.firmware_info['is_compatible'] = False
+                    return self.firmware_info
+
+            # If all tests pass
+            self.firmware_info['is_compatible'] = True
+            self.firmware_info['last_verified'] = datetime.now().isoformat()
+            logging.info("ESP32 firmware verification successful")
+            
+        except Exception as e:
+            logging.error(f"Error verifying firmware: {e}")
+            self.firmware_info['is_compatible'] = False
+
+        return self.firmware_info
+
+    def check_firmware_requirements(self) -> List[str]:
+        """
+        Check if the ESP32 firmware meets all requirements.
+        
+        Returns:
+            List[str]: List of missing or incompatible features
+        """
+        requirements = []
+        
+        if not self.firmware_info['version']:
+            requirements.append("Firmware version not detected")
+        if not self.firmware_info['protocol_version']:
+            requirements.append("Protocol version not detected")
+        if not self.firmware_info['is_compatible']:
+            requirements.append("Firmware is not compatible with current system")
+            
+        return requirements
+
+    def get_firmware_status(self) -> str:
+        """
+        Get a human-readable status of the firmware.
+        
+        Returns:
+            str: Status message
+        """
+        if not self.firmware_info['version']:
+            return "Firmware not detected"
+            
+        status = f"Firmware Version: {self.firmware_info['version']}\n"
+        status += f"Protocol Version: {self.firmware_info['protocol_version']}\n"
+        status += f"Last Verified: {self.firmware_info['last_verified']}\n"
+        status += f"Compatible: {'Yes' if self.firmware_info['is_compatible'] else 'No'}"
+        
+        return status
 
 class SecurityManager:
     """
@@ -1844,6 +2027,30 @@ if __name__ == "__main__":
         # Start up our gate control system
         gate_system = GateControlSystem()
         
+        # Run diagnostics before starting
+        logging.info("Running initial system diagnostics...")
+        diagnostics = gate_system.esp32.run_diagnostics()
+        logging.info("Diagnostic results:")
+        for key, value in diagnostics.items():
+            logging.info(f"{key}: {value}")
+        
+        # Check firmware status
+        firmware_status = gate_system.esp32.get_firmware_status()
+        logging.info("\nFirmware Status:")
+        logging.info(firmware_status)
+        
+        # Check firmware requirements
+        missing_requirements = gate_system.esp32.check_firmware_requirements()
+        if missing_requirements:
+            logging.error("\nFirmware Requirements Not Met:")
+            for req in missing_requirements:
+                logging.error(f"- {req}")
+            logging.error("\nPlease update the ESP32 firmware to the latest version")
+            logging.error("Required firmware features:")
+            logging.error("1. Version reporting (VERSION command)")
+            logging.error("2. Protocol version reporting (PROTOCOL command)")
+            logging.error("3. Basic command support (PING, STATUS)")
+        
         # Create our nice-looking interface
         root = tk.Tk()
         app = GateControlGUI(root, gate_system.config, gate_system.esp32)
@@ -1857,7 +2064,7 @@ if __name__ == "__main__":
         root.mainloop()
         
     except KeyboardInterrupt:
-        logging.info("Shutting down the system... 👋")
+        logging.info("Shutting down the system")
         gate_system.cleanup()
     except Exception as e:
         logging.error(f"Oops! Something went wrong: {e}")
