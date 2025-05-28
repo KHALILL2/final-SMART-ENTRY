@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 3.5
+Version: 3.6
 """
 
 import time
@@ -442,12 +442,21 @@ class ESP32Controller:
                 self.serial.reset_input_buffer()
                 self.serial.reset_output_buffer()
                 
-                # Wait for startup message with timeout
+                # Send reset command
+                self.serial.write(b"RESET\n")
+                self.serial.flush()
+                time.sleep(0.5)
+                
+                # Wait for startup message with timeout and debug output
                 start_time = time.time()
-                while time.time() - start_time < 2.0:
+                debug_messages = []
+                while time.time() - start_time < 3.0:  # Increased timeout to 3 seconds
                     if self.serial.in_waiting:
                         try:
                             line = self.serial.readline().decode('utf-8').strip()
+                            debug_messages.append(line)
+                            logging.debug(f"Received from ESP32: {line}")
+                            
                             if "SYSTEM:READY" in line:
                                 self.connected = True
                                 self.connection_status = "Connected"
@@ -457,7 +466,11 @@ class ESP32Controller:
                                 # Turn off LED after connection
                                 self.send_command("LED:OFF")
                                 return
+                            elif "ERROR" in line:
+                                self.last_error = f"ESP32 reported error: {line}"
+                                break
                         except UnicodeDecodeError:
+                            debug_messages.append("Invalid UTF-8 data received")
                             continue
                     time.sleep(0.1)
                 
@@ -465,6 +478,20 @@ class ESP32Controller:
                 self.connection_status = "No response"
                 self.last_error = "No startup message received"
                 logging.error("No startup message received from ESP32")
+                logging.error(f"Debug messages received: {debug_messages}")
+                
+                # Try to get any error messages
+                try:
+                    self.serial.write(b"STATUS:ERROR\n")
+                    self.serial.flush()
+                    time.sleep(0.5)
+                    if self.serial.in_waiting:
+                        error_msg = self.serial.readline().decode('utf-8').strip()
+                        if error_msg:
+                            self.last_error = f"ESP32 error: {error_msg}"
+                except:
+                    pass
+                
                 if self.serial:
                     self.serial.close()
                     self.serial = None
@@ -573,7 +600,20 @@ class ESP32Controller:
                     logging.info(f"Found potential ESP32 device: {port.device}")
                     logging.info(f"Device details: {port.description}")
                     logging.info(f"Hardware ID: {port.hwid}")
-                    return port.device
+                    
+                    # Try to open the port to verify it's working
+                    try:
+                        test_serial = serial.Serial(
+                            port=port.device,
+                            baudrate=self.config.baud_rate,
+                            timeout=1
+                        )
+                        test_serial.close()
+                        logging.info(f"Successfully verified port {port.device}")
+                        return port.device
+                    except Exception as e:
+                        logging.warning(f"Port {port.device} found but could not be opened: {e}")
+                        continue
                     
             logging.warning("No ESP32 device found. Please ensure ESP32 is connected and recognized.")
             return None
@@ -611,7 +651,21 @@ class ESP32Controller:
                     logging.error(f"Failed to add user to dialout group: {e}")
                     logging.error("Please run: sudo usermod -a -G dialout $USER")
                     return False
-            return True
+                    
+            # Try to open port with different permissions
+            try:
+                test_serial = serial.Serial(
+                    port=port,
+                    baudrate=self.config.baud_rate,
+                    timeout=1
+                )
+                test_serial.close()
+                logging.info(f"Successfully verified port {port} permissions")
+                return True
+            except Exception as e:
+                logging.error(f"Failed to open port {port}: {e}")
+                return False
+                
         except Exception as e:
             logging.error(f"Error checking USB permissions: {e}")
             return False
