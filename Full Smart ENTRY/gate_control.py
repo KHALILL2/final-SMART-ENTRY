@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 3.3
+Version: 3.4
 """
 
 import time
@@ -339,6 +339,7 @@ class ESP32Controller:
         # Connection monitoring variables
         self.last_connection_check = time.time()
         self.reconnect_attempts = 0
+        self.connection_status = "Disconnected"
         
         # Start monitoring threads
         self.running = True
@@ -390,6 +391,7 @@ class ESP32Controller:
                 port = self.get_esp32_port()
                 if not port:
                     logging.error("No ESP32 device found")
+                    self.connection_status = "No device found"
                     return
                 
                 # Create serial connection
@@ -404,7 +406,7 @@ class ESP32Controller:
                 self.serial.setDTR(False)
                 time.sleep(0.1)
                 self.serial.setDTR(True)
-                time.sleep(0.5)  # Reduced wait time
+                time.sleep(0.5)
                 
                 # Clear buffers
                 self.serial.reset_input_buffer()
@@ -412,12 +414,13 @@ class ESP32Controller:
                 
                 # Wait for startup message
                 start_time = time.time()
-                while time.time() - start_time < 2.0:  # Reduced timeout
+                while time.time() - start_time < 2.0:
                     if self.serial.in_waiting:
                         try:
                             line = self.serial.readline().decode('utf-8').strip()
                             if "SYSTEM:READY" in line:
                                 self.connected = True
+                                self.connection_status = "Connected"
                                 logging.info("ESP32 connected successfully")
                                 # Turn off LED after connection
                                 self.send_command("LED:OFF")
@@ -427,12 +430,14 @@ class ESP32Controller:
                     time.sleep(0.1)
                 
                 logging.error("No startup message received from ESP32")
+                self.connection_status = "No response"
                 if self.serial:
                     self.serial.close()
                     self.serial = None
                 
             except Exception as e:
                 logging.error(f"Error connecting to ESP32: {e}")
+                self.connection_status = f"Error: {str(e)}"
                 if self.serial:
                     self.serial.close()
                     self.serial = None
@@ -442,6 +447,7 @@ class ESP32Controller:
         with self.connection_lock:
             if not self.connected or not self.serial or not self.serial.is_open:
                 logging.warning(f"ESP32 not connected. Cannot send command: {command}")
+                self.connection_status = "Disconnected"
                 return False
             
             try:
@@ -476,6 +482,7 @@ class ESP32Controller:
             except Exception as e:
                 logging.error(f"Error sending command '{command.strip()}': {e}")
                 self.connected = False
+                self.connection_status = f"Error: {str(e)}"
                 return False
 
     def emergency_stop(self):
@@ -563,9 +570,7 @@ class ESP32Controller:
             return False
 
     def monitor_connection(self):
-        """
-        Monitor USB connection status and handle reconnection.
-        """
+        """Monitor USB connection status and handle reconnection."""
         while self.running:
             try:
                 current_time = time.time()
@@ -575,15 +580,12 @@ class ESP32Controller:
                     if not self.connected:
                         if self.reconnect_attempts < self.config.max_reconnect_attempts:
                             logging.info(f"Attempting to reconnect to ESP32 (Attempt {self.reconnect_attempts + 1}/{self.config.max_reconnect_attempts})")
+                            self.connection_status = "Reconnecting..."
                             self.connect_esp32()
                             self.reconnect_attempts += 1
                         else:
-                            logging.error("Max reconnection attempts reached. Please:")
-                            logging.error("1. Check USB connection")
-                            logging.error("2. Restart the ESP32")
-                            logging.error("3. Restart the Raspberry Pi")
-                            logging.error("4. Check USB cable")
-                            logging.error("5. Verify ESP32 is powered")
+                            self.connection_status = "Connection failed"
+                            logging.error("Max reconnection attempts reached")
                     else:
                         # Verify connection is still active
                         try:
@@ -592,9 +594,11 @@ class ESP32Controller:
                             response = self.serial.readline().decode().strip()
                             if not response:
                                 raise Exception("No response from ESP32")
+                            self.connection_status = "Connected"
                         except:
                             logging.warning("Lost connection to ESP32")
                             self.connected = False
+                            self.connection_status = "Disconnected"
                             self.reconnect_attempts = 0
                 
                 time.sleep(1)
@@ -1377,7 +1381,7 @@ class GateControlGUI:
         
         # Configure main window
         self.root.title("Gate Control System")
-        self.root.geometry("1000x800")  # Increased window size
+        self.root.geometry("1000x800")
         self.root.configure(bg='#f0f0f0')
         
         # Create main frame with padding
@@ -1507,6 +1511,48 @@ class GateControlGUI:
         # Start system metrics update
         self.update_system_metrics()
 
+    def update_status(self):
+        """Update the status display with current system state."""
+        try:
+            # Update connection status
+            status = self.esp32.connection_status
+            if status == "Connected":
+                self.connection_status.config(text="ESP32: Connected", foreground="green")
+            elif "Error" in status:
+                self.connection_status.config(text=f"ESP32: {status}", foreground="red")
+            elif status == "Reconnecting...":
+                self.connection_status.config(text="ESP32: Reconnecting...", foreground="orange")
+            else:
+                self.connection_status.config(text=f"ESP32: {status}", foreground="red")
+            
+            # Update gate status
+            gate_state = self.esp32.gate_state.name
+            if gate_state == "OPEN":
+                self.gate_status.config(text="Gate: Open", foreground="green")
+            elif gate_state == "CLOSED":
+                self.gate_status.config(text="Gate: Closed", foreground="blue")
+            elif gate_state == "OPENING":
+                self.gate_status.config(text="Gate: Opening...", foreground="orange")
+            elif gate_state == "CLOSING":
+                self.gate_status.config(text="Gate: Closing...", foreground="orange")
+            else:
+                self.gate_status.config(text="Gate: Error", foreground="red")
+            
+            # Update lock status
+            lock_state = self.esp32.actual_lock_state
+            if lock_state == "LOCKED":
+                self.lock_status.config(text="Lock: Locked", foreground="blue")
+            elif lock_state == "UNLOCKED":
+                self.lock_status.config(text="Lock: Unlocked", foreground="green")
+            else:
+                self.lock_status.config(text="Lock: Unknown", foreground="gray")
+            
+        except Exception as e:
+            logging.error(f"Error updating status: {e}")
+        
+        # Schedule next update
+        self.root.after(1000, self.update_status)
+
     def update_system_metrics(self):
         """Update system health metrics."""
         try:
@@ -1565,40 +1611,7 @@ class GateControlGUI:
             logging.error(f"Error updating system metrics: {e}")
         
         # Schedule next update
-        self.root.after(5000, self.update_system_metrics)  # Update every 5 seconds
-
-    def update_status(self):
-        """Update the status display with current system state."""
-        # Update connection status
-        if self.esp32.connected:
-            self.connection_status.config(text="ESP32: Connected", foreground="green")
-        else:
-            self.connection_status.config(text="ESP32: Disconnected", foreground="red")
-        
-        # Update gate status
-        gate_state = self.esp32.gate_state.name
-        if gate_state == "OPEN":
-            self.gate_status.config(text="Gate: Open", foreground="green")
-        elif gate_state == "CLOSED":
-            self.gate_status.config(text="Gate: Closed", foreground="blue")
-        elif gate_state == "OPENING":
-            self.gate_status.config(text="Gate: Opening...", foreground="orange")
-        elif gate_state == "CLOSING":
-            self.gate_status.config(text="Gate: Closing...", foreground="orange")
-        else:
-            self.gate_status.config(text="Gate: Error", foreground="red")
-        
-        # Update lock status
-        lock_state = self.esp32.actual_lock_state
-        if lock_state == "LOCKED":
-            self.lock_status.config(text="Lock: Locked", foreground="blue")
-        elif lock_state == "UNLOCKED":
-            self.lock_status.config(text="Lock: Unlocked", foreground="green")
-        else:
-            self.lock_status.config(text="Lock: Unknown", foreground="gray")
-        
-        # Schedule next update
-        self.root.after(1000, self.update_status)
+        self.root.after(5000, self.update_system_metrics)
 
     def update_card_list(self):
         """Update the card list display."""
