@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 3.7
+Version: 3.8
 """
 
 import time
@@ -1532,72 +1532,67 @@ class CardManager:
 
 class GateControlGUI:
     """
-    Provides the graphical user interface for the gate control system.
-    Features real-time status monitoring and control capabilities.
+    GUI for the gate control system.
+    Displays system status and provides control interface.
     """
     
     def __init__(self, root: tk.Tk, config: HardwareConfig, esp32: ESP32Controller) -> None:
         self.root = root
         self.config = config
         self.esp32 = esp32
-        self.card_manager = CardManager()
         
-        # Configure main window
-        self.root.title("Gate Control System")
-        self.root.geometry("1000x800")
-        self.root.configure(bg='#f0f0f0')
-        
-        # Create main frame with padding
-        self.main_frame = ttk.Frame(self.root, padding="10")
+        # Create main frame
+        self.main_frame = ttk.Frame(root, padding="10")
         self.main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Create status frame
+        # Status frame
         self.status_frame = ttk.LabelFrame(self.main_frame, text="System Status", padding="5")
         self.status_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        # Status indicators
+        # Status labels
         self.connection_status = ttk.Label(self.status_frame, text="ESP32: Disconnected", foreground="red")
-        self.connection_status.pack(side=tk.LEFT, padx=5)
+        self.connection_status.pack(anchor=tk.W, padx=5, pady=2)
         
         self.gate_status = ttk.Label(self.status_frame, text="Gate: Unknown", foreground="gray")
-        self.gate_status.pack(side=tk.LEFT, padx=5)
+        self.gate_status.pack(anchor=tk.W, padx=5, pady=2)
         
         self.lock_status = ttk.Label(self.status_frame, text="Lock: Unknown", foreground="gray")
-        self.lock_status.pack(side=tk.LEFT, padx=5)
+        self.lock_status.pack(anchor=tk.W, padx=5, pady=2)
         
-        # Create health monitoring frame
+        # Health monitoring frame
         self.health_frame = ttk.LabelFrame(self.main_frame, text="System Health", padding="5")
         self.health_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        # Create a grid for health indicators
-        self.health_grid = ttk.Frame(self.health_frame)
-        self.health_grid.pack(fill=tk.X, padx=5, pady=5)
-        
         # Component Health Indicators
         self.component_health = {
-            'motor': {'label': ttk.Label(self.health_grid, text="Motor: Unknown"), 'status': "Unknown"},
-            'sensors': {'label': ttk.Label(self.health_grid, text="Sensors: Unknown"), 'status': "Unknown"},
-            'lock': {'label': ttk.Label(self.health_grid, text="Lock: Unknown"), 'status': "Unknown"},
-            'ir_sensor': {'label': ttk.Label(self.health_grid, text="IR Sensor: Unknown"), 'status': "Unknown"}
+            'nfc_reader': {'label': ttk.Label(self.health_frame, text="NFC Reader: Unknown"), 'status': "Unknown"},
+            'esp32': {'label': ttk.Label(self.health_frame, text="ESP32: Unknown"), 'status': "Unknown"},
+            'gate_sensors': {'label': ttk.Label(self.health_frame, text="Gate Sensors: Unknown"), 'status': "Unknown"},
+            'lock_mechanism': {'label': ttk.Label(self.health_frame, text="Lock Mechanism: Unknown"), 'status': "Unknown"}
         }
         
-        # Temperature and Power Indicators
-        self.system_metrics = {
-            'temperature': {'label': ttk.Label(self.health_grid, text="Temperature: --°C"), 'value': 0},
-            'power': {'label': ttk.Label(self.health_grid, text="Power: --V"), 'value': 0},
-            'memory': {'label': ttk.Label(self.health_grid, text="Memory: --%"), 'value': 0},
-            'uptime': {'label': ttk.Label(self.health_grid, text="Uptime: --:--:--"), 'value': 0}
-        }
-        
-        # Layout health indicators in a grid
+        # Layout health indicators
         row = 0
         for component, data in self.component_health.items():
             data['label'].grid(row=row, column=0, padx=5, pady=2, sticky=tk.W)
             row += 1
-            
+        
+        # System metrics frame
+        self.metrics_frame = ttk.LabelFrame(self.main_frame, text="System Metrics", padding="5")
+        self.metrics_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # System metrics
+        self.system_metrics = {
+            'temperature': {'label': ttk.Label(self.metrics_frame, text="Temperature: --°C"), 'value': 0},
+            'power': {'label': ttk.Label(self.metrics_frame, text="Power: --V"), 'value': 0},
+            'memory': {'label': ttk.Label(self.metrics_frame, text="Memory: --%"), 'value': 0},
+            'uptime': {'label': ttk.Label(self.metrics_frame, text="Uptime: --:--:--"), 'value': 0}
+        }
+        
+        # Layout metrics
         row = 0
         for metric, data in self.system_metrics.items():
-            data['label'].grid(row=row, column=1, padx=5, pady=2, sticky=tk.W)
+            data['label'].grid(row=row, column=0, padx=5, pady=2, sticky=tk.W)
             row += 1
         
         # Control buttons frame
@@ -1617,63 +1612,9 @@ class GateControlGUI:
         self.unlock_button = ttk.Button(self.control_frame, text="Unlock Gate", command=self.unlock_gate)
         self.unlock_button.pack(side=tk.LEFT, padx=5)
         
-        # Card management frame
-        self.card_frame = ttk.LabelFrame(self.main_frame, text="Card Management", padding="5")
-        self.card_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Card list with scrollbar
-        self.card_list_frame = ttk.Frame(self.card_frame)
-        self.card_list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        self.card_list = tk.Listbox(self.card_list_frame, height=6)
-        self.card_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        self.card_scrollbar = ttk.Scrollbar(self.card_list_frame, orient=tk.VERTICAL, command=self.card_list.yview)
-        self.card_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.card_list['yscrollcommand'] = self.card_scrollbar.set
-        
-        # Card management buttons
-        self.card_button_frame = ttk.Frame(self.card_frame)
-        self.card_button_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        self.add_card_button = ttk.Button(self.card_button_frame, text="Add Card", command=self.add_card)
-        self.add_card_button.pack(side=tk.LEFT, padx=5)
-        
-        self.remove_card_button = ttk.Button(self.card_button_frame, text="Remove Card", command=self.remove_card)
-        self.remove_card_button.pack(side=tk.LEFT, padx=5)
-        
-        # Log frame
-        self.log_frame = ttk.LabelFrame(self.main_frame, text="System Log", padding="5")
-        self.log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Log text widget with scrollbar
-        self.log_text = tk.Text(self.log_frame, height=10, width=80)
-        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        self.log_scrollbar = ttk.Scrollbar(self.log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
-        self.log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.log_text['yscrollcommand'] = self.log_scrollbar.set
-        
-        # Configure text tags for different log levels
-        self.log_text.tag_configure("error", foreground="red")
-        self.log_text.tag_configure("warning", foreground="orange")
-        self.log_text.tag_configure("info", foreground="black")
-        
-        # Start status update
+        # Start status update timer
         self.update_status()
-        
-        # Bind window close event
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        
-        # Initialize card list
-        self.update_card_list()
-        
-        # Add initial log message
-        self.log_message("Gate Control System initialized", "info")
-        
-        # Start system metrics update
-        self.update_system_metrics()
-
+    
     def update_status(self):
         """Update the status display with current system state."""
         try:
@@ -1710,207 +1651,64 @@ class GateControlGUI:
             else:
                 self.lock_status.config(text="Lock: Unknown", foreground="gray")
             
+            # Update component health
+            system_health = self.esp32.get_system_health()
+            for component, data in self.component_health.items():
+                status = system_health[component]['status']
+                if status == "OK":
+                    data['label'].config(text=f"{component.replace('_', ' ').title()}: OK", foreground="green")
+                elif status == "Error":
+                    data['label'].config(text=f"{component.replace('_', ' ').title()}: Error", foreground="red")
+                else:
+                    data['label'].config(text=f"{component.replace('_', ' ').title()}: Unknown", foreground="gray")
+            
+            # Update system metrics
+            metrics = self.esp32.get_system_metrics()
+            for metric, data in self.system_metrics.items():
+                if metric in metrics:
+                    value = metrics[metric]
+                    if metric == 'temperature':
+                        data['label'].config(text=f"Temperature: {value}°C")
+                    elif metric == 'power':
+                        data['label'].config(text=f"Power: {value}V")
+                    elif metric == 'memory':
+                        data['label'].config(text=f"Memory: {value}%")
+                    elif metric == 'uptime':
+                        data['label'].config(text=f"Uptime: {value}")
+            
         except Exception as e:
             logging.error(f"Error updating status: {e}")
         
         # Schedule next update
         self.root.after(1000, self.update_status)
-
-    def update_system_metrics(self):
-        """Update system health metrics."""
-        try:
-            # Request system metrics from ESP32
-            if self.esp32.connected:
-                # Request temperature
-                temp_response = self.esp32.send_command("STATUS:TEMP", response_timeout=1.0)
-                if temp_response and "TEMP:" in temp_response:
-                    temp = float(temp_response.split(":")[1])
-                    self.system_metrics['temperature']['value'] = temp
-                    self.system_metrics['temperature']['label'].config(
-                        text=f"Temperature: {temp:.1f}°C",
-                        foreground="green" if temp < 80 else "red"
-                    )
-                
-                # Request power status
-                power_response = self.esp32.send_command("STATUS:POWER", response_timeout=1.0)
-                if power_response and "POWER:" in power_response:
-                    power = float(power_response.split(":")[1])
-                    self.system_metrics['power']['value'] = power
-                    self.system_metrics['power']['label'].config(
-                        text=f"Power: {power:.1f}V",
-                        foreground="green" if 4.5 <= power <= 5.5 else "red"
-                    )
-                
-                # Request component health
-                health_response = self.esp32.send_command("STATUS:HEALTH", response_timeout=1.0)
-                if health_response:
-                    for component in self.component_health:
-                        if f"{component.upper()}_STATUS:" in health_response:
-                            status = health_response.split(f"{component.upper()}_STATUS:")[1].split()[0]
-                            self.component_health[component]['status'] = status
-                            self.component_health[component]['label'].config(
-                                text=f"{component.title()}: {status}",
-                                foreground="green" if status == "OK" else "red"
-                            )
-                
-                # Update memory usage
-                memory_response = self.esp32.send_command("STATUS:MEMORY", response_timeout=1.0)
-                if memory_response and "MEMORY:" in memory_response:
-                    memory = float(memory_response.split(":")[1])
-                    self.system_metrics['memory']['value'] = memory
-                    self.system_metrics['memory']['label'].config(
-                        text=f"Memory: {memory:.1f}%",
-                        foreground="green" if memory < 80 else "orange"
-                    )
-                
-                # Update uptime
-                uptime_response = self.esp32.send_command("STATUS:UPTIME", response_timeout=1.0)
-                if uptime_response and "UPTIME:" in uptime_response:
-                    uptime = uptime_response.split(":")[1]
-                    self.system_metrics['uptime']['value'] = uptime
-                    self.system_metrics['uptime']['label'].config(text=f"Uptime: {uptime}")
-        
-        except Exception as e:
-            logging.error(f"Error updating system metrics: {e}")
-        
-        # Schedule next update
-        self.root.after(5000, self.update_system_metrics)
-
-    def update_card_list(self):
-        """Update the card list display."""
-        self.card_list.delete(0, tk.END)
-        for card in self.card_manager.get_all_cards():
-            self.card_list.insert(tk.END, f"{card['id']} - {card['name']}")
-
-    def on_card_select(self, event):
-        """Handle card selection in the list."""
-        selection = self.card_list.curselection()
-        if selection:
-            index = selection[0]
-            card = self.card_manager.get_all_cards()[index]
-            self.log_message(f"Selected card: {card['name']} ({card['id']})", "info")
-
-    def add_card(self):
-        """Add a new card to the system."""
-        dialog = CardDialog(self.root, "Add Card")
-        if dialog.result:
-            card_id, card_name = dialog.result
-            if self.card_manager.add_card(card_id, card_name):
-                self.log_message(f"Added card: {card_name} ({card_id})", "info")
-                self.update_card_list()
-            else:
-                self.log_message(f"Failed to add card: {card_id} already exists", "error")
-
-    def remove_card(self):
-        """Remove the selected card from the system."""
-        selection = self.card_list.curselection()
-        if selection:
-            index = selection[0]
-            card = self.card_manager.get_all_cards()[index]
-            if self.card_manager.remove_card(card['id']):
-                self.log_message(f"Removed card: {card['name']} ({card['id']})", "info")
-                self.update_card_list()
-            else:
-                self.log_message(f"Failed to remove card: {card['id']}", "error")
-        else:
-            self.log_message("Please select a card to remove", "warning")
-
-    def log_message(self, message: str, level: str = "info"):
-        """Add a message to the log display."""
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n", level)
-        self.log_text.see(tk.END)
-
+    
     def open_gate(self):
-        """Send command to open the gate."""
-        if self.esp32.connected:
-            self.esp32.send_command("GATE:OPEN")
-            self.log_message("Sending command: Open Gate", "info")
-        else:
-            self.log_message("Cannot open gate: ESP32 not connected", "error")
-
+        """Open the gate."""
+        try:
+            self.esp32.send_command("OPEN")
+        except Exception as e:
+            logging.error(f"Error opening gate: {e}")
+    
     def close_gate(self):
-        """Send command to close the gate."""
-        if self.esp32.connected:
-            self.esp32.send_command("GATE:CLOSE")
-            self.log_message("Sending command: Close Gate", "info")
-        else:
-            self.log_message("Cannot close gate: ESP32 not connected", "error")
-
+        """Close the gate."""
+        try:
+            self.esp32.send_command("CLOSE")
+        except Exception as e:
+            logging.error(f"Error closing gate: {e}")
+    
     def lock_gate(self):
-        """Send command to lock the gate."""
-        if self.esp32.connected:
-            self.esp32.lock_gate()
-            self.log_message("Sending command: Lock Gate", "info")
-        else:
-            self.log_message("Cannot lock gate: ESP32 not connected", "error")
-
+        """Lock the gate."""
+        try:
+            self.esp32.send_command("LOCK")
+        except Exception as e:
+            logging.error(f"Error locking gate: {e}")
+    
     def unlock_gate(self):
-        """Send command to unlock the gate."""
-        if self.esp32.connected:
-            self.esp32.unlock_gate()
-            self.log_message("Sending command: Unlock Gate", "info")
-        else:
-            self.log_message("Cannot unlock gate: ESP32 not connected", "error")
-
-    def on_closing(self):
-        """Handle window closing event."""
-        if messagebox.askokcancel("Quit", "Do you want to quit?"):
-            self.esp32.cleanup()
-            self.root.destroy()
-
-class CardDialog:
-    def __init__(self, parent, title):
-        self.result = None
-        
-        # Create dialog window
-        self.dialog = tk.Toplevel(parent)
-        self.dialog.title(title)
-        self.dialog.geometry("300x150")
-        self.dialog.transient(parent)
-        self.dialog.grab_set()
-        
-        # Create and pack widgets
-        ttk.Label(self.dialog, text="Card ID:").pack(pady=5)
-        self.id_entry = ttk.Entry(self.dialog)
-        self.id_entry.pack(pady=5)
-        
-        ttk.Label(self.dialog, text="Card Name:").pack(pady=5)
-        self.name_entry = ttk.Entry(self.dialog)
-        self.name_entry.pack(pady=5)
-        
-        # Buttons
-        button_frame = ttk.Frame(self.dialog)
-        button_frame.pack(pady=10)
-        
-        ttk.Button(button_frame, text="OK", command=self.on_ok).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="Cancel", command=self.on_cancel).pack(side=tk.LEFT, padx=5)
-        
-        # Center dialog
-        self.dialog.update_idletasks()
-        width = self.dialog.winfo_width()
-        height = self.dialog.winfo_height()
-        x = (self.dialog.winfo_screenwidth() // 2) - (width // 2)
-        y = (self.dialog.winfo_screenheight() // 2) - (height // 2)
-        self.dialog.geometry(f'{width}x{height}+{x}+{y}')
-        
-        # Wait for dialog to close
-        parent.wait_window(self.dialog)
-
-    def on_ok(self):
-        """Handle OK button click."""
-        card_id = self.id_entry.get().strip()
-        card_name = self.name_entry.get().strip()
-        
-        if card_id and card_name:
-            self.result = (card_id, card_name)
-            self.dialog.destroy()
-        else:
-            messagebox.showerror("Error", "Please enter both Card ID and Name")
-
-    def on_cancel(self):
-        """Handle Cancel button click."""
-        self.dialog.destroy()
+        """Unlock the gate."""
+        try:
+            self.esp32.send_command("UNLOCK")
+        except Exception as e:
+            logging.error(f"Error unlocking gate: {e}")
 
 class GateControlSystem:
     """
@@ -1955,6 +1753,14 @@ class GateControlSystem:
         self.last_card_id: Optional[str] = None
         self.system_ready = False
         
+        # System health monitoring
+        self.system_health = {
+            'nfc_reader': {'status': 'Unknown', 'last_check': 0},
+            'esp32': {'status': 'Unknown', 'last_check': 0},
+            'gate_sensors': {'status': 'Unknown', 'last_check': 0},
+            'lock_mechanism': {'status': 'Unknown', 'last_check': 0}
+        }
+        
         # Start system initialization
         self.initialize_system()
 
@@ -1966,11 +1772,13 @@ class GateControlSystem:
             # Verify ESP32 connection
             if not self.esp32.connected:
                 logging.warning("ESP32 not connected during initialization")
+                self.system_health['esp32']['status'] = 'Error'
                 return
             
             # Verify NFC reader
             if self.pn532 is None:
                 logging.warning("NFC reader not available during initialization")
+                self.system_health['nfc_reader']['status'] = 'Error'
                 return
             
             # Ensure gate is locked on startup
@@ -1980,11 +1788,57 @@ class GateControlSystem:
             # Request initial status from ESP32
             self.esp32.send_command("GATE:STATUS")
             
+            # Update system health
+            self.system_health['esp32']['status'] = 'OK'
+            self.system_health['nfc_reader']['status'] = 'OK'
+            
             self.system_ready = True
             logging.info("Gate control system initialized and ready")
         except Exception as e:
             logging.error(f"Error during system initialization: {e}")
             self.system_ready = False
+
+    def check_system_health(self) -> None:
+        """
+        Check the health of all system components.
+        Updates the system_health dictionary with current status.
+        """
+        current_time = time.time()
+        
+        # Check ESP32 connection
+        if self.esp32.connected:
+            self.system_health['esp32']['status'] = 'OK'
+        else:
+            self.system_health['esp32']['status'] = 'Error'
+        self.system_health['esp32']['last_check'] = current_time
+        
+        # Check NFC reader
+        if self.pn532 is not None:
+            try:
+                # Try to read a card to verify NFC reader is working
+                self.pn532.read_passive_target(timeout=0.1)
+                self.system_health['nfc_reader']['status'] = 'OK'
+            except Exception:
+                self.system_health['nfc_reader']['status'] = 'Error'
+        else:
+            self.system_health['nfc_reader']['status'] = 'Error'
+        self.system_health['nfc_reader']['last_check'] = current_time
+        
+        # Check gate sensors through ESP32
+        try:
+            self.esp32.send_command("SENSOR:STATUS")
+            self.system_health['gate_sensors']['status'] = 'OK'
+        except Exception:
+            self.system_health['gate_sensors']['status'] = 'Error'
+        self.system_health['gate_sensors']['last_check'] = current_time
+        
+        # Check lock mechanism
+        try:
+            self.esp32.send_command("LOCK:STATUS")
+            self.system_health['lock_mechanism']['status'] = 'OK'
+        except Exception:
+            self.system_health['lock_mechanism']['status'] = 'Error'
+        self.system_health['lock_mechanism']['last_check'] = current_time
 
     def run(self) -> None:
         """
@@ -1992,8 +1846,18 @@ class GateControlSystem:
         Continuously monitors for NFC cards and processes them.
         """
         logging.info("Starting gate control system")
+        last_health_check = 0
+        health_check_interval = 30  # Check system health every 30 seconds
+        
         try:
             while True:
+                current_time = time.time()
+                
+                # Periodic system health check
+                if current_time - last_health_check >= health_check_interval:
+                    self.check_system_health()
+                    last_health_check = current_time
+                
                 # Check for status updates from ESP32
                 try:
                     status = self.esp32.status_queue.get_nowait()
@@ -2005,6 +1869,10 @@ class GateControlSystem:
                             self.close_gate()
                     elif "UNAUTHORIZED" in status:
                         self.handle_unauthorized_access()
+                    elif "SENSOR:ERROR" in status:
+                        self.system_health['gate_sensors']['status'] = 'Error'
+                    elif "LOCK:ERROR" in status:
+                        self.system_health['lock_mechanism']['status'] = 'Error'
                 except queue.Empty:
                     pass
 
@@ -2060,6 +1928,7 @@ class GateControlSystem:
             return None
         except Exception as e:
             logging.error(f"Error reading NFC: {e}")
+            self.system_health['nfc_reader']['status'] = 'Error'
             return None
 
     def handle_card(self, card_id: str) -> None:
@@ -2125,6 +1994,15 @@ class GateControlSystem:
                     self.close_gate()
         except Exception as e:
             logging.error(f"Error handling unauthorized access: {e}")
+
+    def get_system_health(self) -> dict:
+        """
+        Get the current system health status.
+        
+        Returns:
+            dict: Dictionary containing the status of all system components
+        """
+        return self.system_health
 
 if __name__ == "__main__":
     try:
