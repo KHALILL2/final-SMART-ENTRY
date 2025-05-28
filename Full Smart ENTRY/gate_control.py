@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 3.0
+Version: 3.1
 """
 
 import time
@@ -910,27 +910,52 @@ class ESP32Controller:
             return self.firmware_info
 
         try:
+            # Clear input buffer before verification
+            self.serial.reset_input_buffer()
+            
             # Request firmware version
-            response = self.send_command("VERSION", response_timeout=1.0)
-            if response and "VERSION:" in response:
-                try:
-                    # Expected format: "VERSION:x.y.z"
-                    version = response.split(':')[1]
-                    self.firmware_info['version'] = version
-                    logging.info(f"ESP32 Firmware Version: {version}")
-                except:
-                    logging.warning(f"Unexpected version response format: {response}")
+            logging.info("Requesting firmware version...")
+            self.serial.write(b"VERSION\n")
+            self.serial.flush()
+            
+            # Wait for version response
+            start_time = time.time()
+            while time.time() - start_time < 2.0:
+                if self.serial.in_waiting:
+                    try:
+                        response = self.serial.readline().decode('utf-8').strip()
+                        logging.info(f"Version response: {response}")
+                        if "VERSION:" in response:
+                            version = response.split(':')[1]
+                            self.firmware_info['version'] = version
+                            logging.info(f"ESP32 Firmware Version: {version}")
+                            break
+                    except UnicodeDecodeError:
+                        logging.warning("Received invalid UTF-8 data in version response")
+                        continue
+                time.sleep(0.1)
 
             # Request protocol version
-            response = self.send_command("PROTOCOL", response_timeout=1.0)
-            if response and "PROTOCOL:" in response:
-                try:
-                    # Expected format: "PROTOCOL:x.y"
-                    protocol = response.split(':')[1]
-                    self.firmware_info['protocol_version'] = protocol
-                    logging.info(f"ESP32 Protocol Version: {protocol}")
-                except:
-                    logging.warning(f"Unexpected protocol response format: {response}")
+            logging.info("Requesting protocol version...")
+            self.serial.write(b"PROTOCOL\n")
+            self.serial.flush()
+            
+            # Wait for protocol response
+            start_time = time.time()
+            while time.time() - start_time < 2.0:
+                if self.serial.in_waiting:
+                    try:
+                        response = self.serial.readline().decode('utf-8').strip()
+                        logging.info(f"Protocol response: {response}")
+                        if "PROTOCOL:" in response:
+                            protocol = response.split(':')[1]
+                            self.firmware_info['protocol_version'] = protocol
+                            logging.info(f"ESP32 Protocol Version: {protocol}")
+                            break
+                    except UnicodeDecodeError:
+                        logging.warning("Received invalid UTF-8 data in protocol response")
+                        continue
+                time.sleep(0.1)
 
             # Test basic commands
             test_commands = [
@@ -940,9 +965,28 @@ class ESP32Controller:
             ]
 
             for cmd, expected_prefix in test_commands:
-                response = self.send_command(cmd, response_timeout=1.0)
-                if not response or not response.startswith(expected_prefix):
-                    logging.warning(f"Command {cmd} failed or returned unexpected response: {response}")
+                logging.info(f"Testing command: {cmd}")
+                self.serial.write(f"{cmd}\n".encode('utf-8'))
+                self.serial.flush()
+                
+                # Wait for response
+                start_time = time.time()
+                response_received = False
+                while time.time() - start_time < 2.0:
+                    if self.serial.in_waiting:
+                        try:
+                            response = self.serial.readline().decode('utf-8').strip()
+                            logging.info(f"Command response: {response}")
+                            if response.startswith(expected_prefix):
+                                response_received = True
+                                break
+                        except UnicodeDecodeError:
+                            logging.warning(f"Received invalid UTF-8 data in response to {cmd}")
+                            continue
+                    time.sleep(0.1)
+                
+                if not response_received:
+                    logging.warning(f"Command {cmd} failed or returned unexpected response")
                     self.firmware_info['is_compatible'] = False
                     return self.firmware_info
 
@@ -1480,77 +1524,82 @@ class GateControlGUI:
         self.root.geometry("800x600")
         self.root.configure(bg='#f0f0f0')
         
-        # Create main frame
+        # Create main frame with padding
         self.main_frame = ttk.Frame(self.root, padding="10")
-        self.main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
         
         # Create status frame
         self.status_frame = ttk.LabelFrame(self.main_frame, text="System Status", padding="5")
-        self.status_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+        self.status_frame.pack(fill=tk.X, padx=5, pady=5)
         
         # Status indicators
         self.connection_status = ttk.Label(self.status_frame, text="ESP32: Disconnected", foreground="red")
-        self.connection_status.grid(row=0, column=0, padx=5)
+        self.connection_status.pack(side=tk.LEFT, padx=5)
         
         self.gate_status = ttk.Label(self.status_frame, text="Gate: Unknown", foreground="gray")
-        self.gate_status.grid(row=0, column=1, padx=5)
+        self.gate_status.pack(side=tk.LEFT, padx=5)
         
         self.lock_status = ttk.Label(self.status_frame, text="Lock: Unknown", foreground="gray")
-        self.lock_status.grid(row=0, column=2, padx=5)
+        self.lock_status.pack(side=tk.LEFT, padx=5)
         
         # Control buttons frame
         self.control_frame = ttk.LabelFrame(self.main_frame, text="Gate Controls", padding="5")
-        self.control_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+        self.control_frame.pack(fill=tk.X, padx=5, pady=5)
         
         # Control buttons
         self.open_button = ttk.Button(self.control_frame, text="Open Gate", command=self.open_gate)
-        self.open_button.grid(row=0, column=0, padx=5)
+        self.open_button.pack(side=tk.LEFT, padx=5)
         
         self.close_button = ttk.Button(self.control_frame, text="Close Gate", command=self.close_gate)
-        self.close_button.grid(row=0, column=1, padx=5)
+        self.close_button.pack(side=tk.LEFT, padx=5)
         
         self.lock_button = ttk.Button(self.control_frame, text="Lock Gate", command=self.lock_gate)
-        self.lock_button.grid(row=0, column=2, padx=5)
+        self.lock_button.pack(side=tk.LEFT, padx=5)
         
         self.unlock_button = ttk.Button(self.control_frame, text="Unlock Gate", command=self.unlock_gate)
-        self.unlock_button.grid(row=0, column=3, padx=5)
+        self.unlock_button.pack(side=tk.LEFT, padx=5)
         
         # Card management frame
         self.card_frame = ttk.LabelFrame(self.main_frame, text="Card Management", padding="5")
-        self.card_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+        self.card_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Card list
-        self.card_list = tk.Listbox(self.card_frame, height=6)
-        self.card_list.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
-        self.card_list.bind('<<ListboxSelect>>', self.on_card_select)
+        # Card list with scrollbar
+        self.card_list_frame = ttk.Frame(self.card_frame)
+        self.card_list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        self.card_list = tk.Listbox(self.card_list_frame, height=6)
+        self.card_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        self.card_scrollbar = ttk.Scrollbar(self.card_list_frame, orient=tk.VERTICAL, command=self.card_list.yview)
+        self.card_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.card_list['yscrollcommand'] = self.card_scrollbar.set
         
         # Card management buttons
-        self.add_card_button = ttk.Button(self.card_frame, text="Add Card", command=self.add_card)
-        self.add_card_button.grid(row=1, column=0, padx=5)
+        self.card_button_frame = ttk.Frame(self.card_frame)
+        self.card_button_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        self.remove_card_button = ttk.Button(self.card_frame, text="Remove Card", command=self.remove_card)
-        self.remove_card_button.grid(row=1, column=1, padx=5)
+        self.add_card_button = ttk.Button(self.card_button_frame, text="Add Card", command=self.add_card)
+        self.add_card_button.pack(side=tk.LEFT, padx=5)
+        
+        self.remove_card_button = ttk.Button(self.card_button_frame, text="Remove Card", command=self.remove_card)
+        self.remove_card_button.pack(side=tk.LEFT, padx=5)
         
         # Log frame
         self.log_frame = ttk.LabelFrame(self.main_frame, text="System Log", padding="5")
-        self.log_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+        self.log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Log text widget
+        # Log text widget with scrollbar
         self.log_text = tk.Text(self.log_frame, height=10, width=80)
-        self.log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        # Scrollbar for log
         self.log_scrollbar = ttk.Scrollbar(self.log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
-        self.log_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        self.log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text['yscrollcommand'] = self.log_scrollbar.set
         
-        # Configure grid weights
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
-        self.main_frame.columnconfigure(0, weight=1)
-        self.main_frame.rowconfigure(3, weight=1)
-        self.log_frame.columnconfigure(0, weight=1)
-        self.log_frame.rowconfigure(0, weight=1)
+        # Configure text tags for different log levels
+        self.log_text.tag_configure("error", foreground="red")
+        self.log_text.tag_configure("warning", foreground="orange")
+        self.log_text.tag_configure("info", foreground="black")
         
         # Start status update
         self.update_status()
@@ -1560,6 +1609,9 @@ class GateControlGUI:
         
         # Initialize card list
         self.update_card_list()
+        
+        # Add initial log message
+        self.log_message("Gate Control System initialized", "info")
 
     def update_status(self):
         """Update the status display with current system state."""
@@ -1606,7 +1658,7 @@ class GateControlGUI:
         if selection:
             index = selection[0]
             card = self.card_manager.get_all_cards()[index]
-            self.log_message(f"Selected card: {card['name']} ({card['id']})")
+            self.log_message(f"Selected card: {card['name']} ({card['id']})", "info")
 
     def add_card(self):
         """Add a new card to the system."""
@@ -1614,7 +1666,7 @@ class GateControlGUI:
         if dialog.result:
             card_id, card_name = dialog.result
             if self.card_manager.add_card(card_id, card_name):
-                self.log_message(f"Added card: {card_name} ({card_id})")
+                self.log_message(f"Added card: {card_name} ({card_id})", "info")
                 self.update_card_list()
             else:
                 self.log_message(f"Failed to add card: {card_id} already exists", "error")
@@ -1626,7 +1678,7 @@ class GateControlGUI:
             index = selection[0]
             card = self.card_manager.get_all_cards()[index]
             if self.card_manager.remove_card(card['id']):
-                self.log_message(f"Removed card: {card['name']} ({card['id']})")
+                self.log_message(f"Removed card: {card['name']} ({card['id']})", "info")
                 self.update_card_list()
             else:
                 self.log_message(f"Failed to remove card: {card['id']}", "error")
@@ -1636,21 +1688,14 @@ class GateControlGUI:
     def log_message(self, message: str, level: str = "info"):
         """Add a message to the log display."""
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        if level == "error":
-            self.log_text.insert(tk.END, f"[{timestamp}] ERROR: {message}\n", "error")
-            self.log_text.tag_configure("error", foreground="red")
-        elif level == "warning":
-            self.log_text.insert(tk.END, f"[{timestamp}] WARNING: {message}\n", "warning")
-            self.log_text.tag_configure("warning", foreground="orange")
-        else:
-            self.log_text.insert(tk.END, f"[{timestamp}] INFO: {message}\n")
+        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n", level)
         self.log_text.see(tk.END)
 
     def open_gate(self):
         """Send command to open the gate."""
         if self.esp32.connected:
             self.esp32.send_command("GATE:OPEN")
-            self.log_message("Sending command: Open Gate")
+            self.log_message("Sending command: Open Gate", "info")
         else:
             self.log_message("Cannot open gate: ESP32 not connected", "error")
 
@@ -1658,7 +1703,7 @@ class GateControlGUI:
         """Send command to close the gate."""
         if self.esp32.connected:
             self.esp32.send_command("GATE:CLOSE")
-            self.log_message("Sending command: Close Gate")
+            self.log_message("Sending command: Close Gate", "info")
         else:
             self.log_message("Cannot close gate: ESP32 not connected", "error")
 
@@ -1666,7 +1711,7 @@ class GateControlGUI:
         """Send command to lock the gate."""
         if self.esp32.connected:
             self.esp32.lock_gate()
-            self.log_message("Sending command: Lock Gate")
+            self.log_message("Sending command: Lock Gate", "info")
         else:
             self.log_message("Cannot lock gate: ESP32 not connected", "error")
 
@@ -1674,7 +1719,7 @@ class GateControlGUI:
         """Send command to unlock the gate."""
         if self.esp32.connected:
             self.esp32.unlock_gate()
-            self.log_message("Sending command: Unlock Gate")
+            self.log_message("Sending command: Unlock Gate", "info")
         else:
             self.log_message("Cannot unlock gate: ESP32 not connected", "error")
 
@@ -1953,6 +1998,16 @@ class GateControlSystem:
 
 if __name__ == "__main__":
     try:
+        # Configure logging first
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                RotatingFileHandler('gate_system.log', maxBytes=1024*1024, backupCount=3),
+                logging.StreamHandler()
+            ]
+        )
+        
         # Start up our gate control system
         gate_system = GateControlSystem()
         
@@ -1980,21 +2035,30 @@ if __name__ == "__main__":
             logging.error("2. Protocol version reporting (PROTOCOL command)")
             logging.error("3. Basic command support (PING, STATUS)")
         
-        # Create our nice-looking interface
+        # Create and configure the main window
         root = tk.Tk()
+        root.title("Gate Control System")
+        root.geometry("800x600")
+        
+        # Set the theme
+        style = ttk.Style()
+        style.theme_use('clam')  # Use a modern theme
+        
+        # Create the GUI
         app = GateControlGUI(root, gate_system.hardware_config, gate_system.esp32)
         
-        # Start everything in a separate thread
+        # Start the system thread
         system_thread = threading.Thread(target=gate_system.run)
         system_thread.daemon = True
         system_thread.start()
         
-        # Start our interface
+        # Start the GUI main loop
         root.mainloop()
         
     except KeyboardInterrupt:
         logging.info("Shutting down the system")
-        gate_system.cleanup()
+        if 'gate_system' in locals():
+            gate_system.cleanup()
     except Exception as e:
         logging.error(f"Oops! Something went wrong: {e}")
         if 'gate_system' in locals():
