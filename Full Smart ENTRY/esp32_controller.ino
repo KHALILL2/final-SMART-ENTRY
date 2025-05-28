@@ -67,6 +67,22 @@ enum SensorState {
   SENSOR_TIMEOUT
 };
 
+// Function prototypes
+void updateGateState(GateState newState = currentGateState);
+void updateLockState(LockState newState);
+void sendGateStatus();
+void sendSensorStatus();
+void sendLockStatus();
+void checkSensors();
+void checkUnauthorizedAccess();
+void triggerUnauthorizedAlarm();
+void stopAlarm();
+void emergencyStop();
+void indicateAccessGranted();
+void indicateAccessDenied();
+void turnOffLEDs();
+void signalBuzzer(String type);
+
 // Sensor status tracking
 SensorState gateSensorState = SENSOR_OK;
 SensorState irSensorState = SENSOR_OK;
