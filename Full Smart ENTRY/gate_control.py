@@ -32,13 +32,13 @@ ESP32 USB Connection:
 * No additional wiring needed
 
 ESP32 Hardware Connections:
-* Motor Control -> GPIO26 (Pin 11)    # Controls gate movement
-* Gate Sensor -> GPIO27 (Pin 12)      # Detects presence
-* LED Green -> GPIO18 (Pin 30)        # Access granted indicator
-* LED Red -> GPIO19 (Pin 31)          # Access denied indicator
-* Buzzer -> Connected to LED pins     # Audio feedback (shared with LEDs)
-* IR Sensor -> GPIO34 (Pin 6)         # Detects unauthorized access
-* Solenoid Lock -> GPIO27 (Pin 12)    # Locks gate mechanism
+* Motor Control (Servo) -> GPIO25 (Pin 10)  # Controls gate movement
+* Gate Sensor -> GPIO27 (Pin 12)           # Detects presence
+* LED Green -> GPIO18 (Pin 30)             # Access granted indicator
+* LED Red -> GPIO19 (Pin 31)               # Access denied indicator
+* Buzzer -> Connected to LED pins          # Audio feedback (shared with LEDs)
+* IR Sensor -> GPIO34 (Pin 6)              # Detects unauthorized access
+* Solenoid Lock -> GPIO27 (Pin 12)         # Locks gate mechanism
 
 Security Features:
 ----------------
@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 3.6
+Version: 3.7
 """
 
 import time
@@ -316,6 +316,16 @@ class ConfigurationManager:
             log_level=log_config['log_level']
         )
 
+# Hardware pin definitions
+HARDWARE_PINS = {
+    'SERVO_PIN': 25,      # GPIO25 (Pin 10) for servo motor control
+    'SOLENOID_PIN': 27,   # GPIO27 (Pin 12) for solenoid lock
+    'GATE_SENSOR_PIN': 27, # GPIO27 (Pin 12) for gate sensor
+    'GREEN_LED_PIN': 18,  # GPIO18 (Pin 30) for green LED
+    'RED_LED_PIN': 19,    # GPIO19 (Pin 31) for red LED
+    'IR_SENSOR_PIN': 34,  # GPIO34 (Pin 6) for IR sensor
+}
+
 class ESP32Controller:
     """
     Manages communication with the ESP32 controller.
@@ -348,12 +358,38 @@ class ESP32Controller:
             'last_error': None
         }
         
+        # Initialize hardware pins
+        self.initialize_hardware()
+        
         # Start monitoring threads
         self.running = True
         self.start_monitoring_threads()
         
         # Initial connection attempt
         self.connect_esp32()
+
+    def initialize_hardware(self) -> None:
+        """Initialize hardware pins and send configuration to ESP32."""
+        try:
+            # Send pin configuration to ESP32
+            pin_config = {
+                'SERVO': HARDWARE_PINS['SERVO_PIN'],
+                'SOLENOID': HARDWARE_PINS['SOLENOID_PIN'],
+                'GATE_SENSOR': HARDWARE_PINS['GATE_SENSOR_PIN'],
+                'GREEN_LED': HARDWARE_PINS['GREEN_LED_PIN'],
+                'RED_LED': HARDWARE_PINS['RED_LED_PIN'],
+                'IR_SENSOR': HARDWARE_PINS['IR_SENSOR_PIN']
+            }
+            
+            # Convert pin configuration to command
+            pin_config_cmd = "CONFIG:PINS:" + ",".join([f"{k}={v}" for k, v in pin_config.items()])
+            logging.info(f"Sending pin configuration: {pin_config_cmd}")
+            
+            # Store configuration for later use
+            self.pin_config = pin_config
+            
+        except Exception as e:
+            logging.error(f"Error initializing hardware: {e}")
 
     def start_monitoring_threads(self):
         """
@@ -441,6 +477,12 @@ class ESP32Controller:
                 # Clear buffers
                 self.serial.reset_input_buffer()
                 self.serial.reset_output_buffer()
+                
+                # Send pin configuration
+                pin_config_cmd = "CONFIG:PINS:" + ",".join([f"{k}={v}" for k, v in self.pin_config.items()])
+                self.serial.write(f"{pin_config_cmd}\n".encode('utf-8'))
+                self.serial.flush()
+                time.sleep(0.5)
                 
                 # Send reset command
                 self.serial.write(b"RESET\n")
