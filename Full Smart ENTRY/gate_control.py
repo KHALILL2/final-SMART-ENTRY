@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 3.8
+Version: 4.0
 """
 
 import time
@@ -111,7 +111,7 @@ logging.basicConfig(
 )
 
 # Serial communication settings
-SERIAL_PORT = '/dev/ttyUSB0'  # Default ESP32 port
+SERIAL_PORT = '/dev/serial0'  # UART port for Pi <-> ESP32 (GPIO14 TX, GPIO15 RX)
 BAUD_RATE = 115200
 SERIAL_TIMEOUT = 1
 
@@ -1964,15 +1964,18 @@ class GateControlSystem:
             if access_granted:
                 self.security_manager.log_access(card_id, True)
                 self.card_manager.update_card_usage(card_id)
-                
+                # SWAPPED: Use RED for positive feedback
+                self.esp32.send_command("LED:RED")
+                self.esp32.send_command("BUZZER:RED")
                 if not self.is_gate_open:
                     self.open_gate()
                 else:
                     self.close_gate()
             else:
                 self.security_manager.log_access(card_id, False)
-                self.esp32.send_command("LED:RED")
-                self.esp32.send_command("BUZZER:RED")
+                # SWAPPED: Use GREEN for negative feedback
+                self.esp32.send_command("LED:GREEN")
+                self.esp32.send_command("BUZZER:GREEN")
                 logging.warning(f"Access denied: {reason}")
         except Exception as e:
             logging.error(f"Error handling card: {e}")
