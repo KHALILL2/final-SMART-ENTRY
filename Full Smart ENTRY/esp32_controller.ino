@@ -3,15 +3,16 @@
 #include <Arduino.h>
 
 // Pin Definitions
-const int MOTOR_CTRL_PIN = 25;    // GPIO25 (Pin 10) for servo motor control
-const int GATE_SENSOR_PIN_OPEN = 27;  // GPIO27 (Pin 12) for gate sensor
-const int GATE_SENSOR_PIN_CLOSED = 27; // Using same pin for now, can be changed if needed
-const int LED_GREEN_PIN = 18;     // GPIO18 (Pin 30) for green LED
-const int LED_RED_PIN = 19;       // GPIO19 (Pin 31) for red LED
-const int BUZZER_PIN = 18;        // Using green LED pin for buzzer (shared)
-const int IR_SENSOR_PIN = 34;     // GPIO34 (Pin 6) for IR sensor
-const int SOLENOID_LOCK_PIN = 27; // GPIO27 (Pin 12) for solenoid lock
-const int OCCUPANCY_SENSOR_PIN = 27; // Using gate sensor pin for occupancy
+const int SERVO_PWM_PIN = 25;         // Servo signal (GPIO25)
+const int RELAY_CTRL_PIN = 26;        // Relay control for servo power (GPIO26)
+const int LED_GREEN_PIN = 13;         // Green LED & buzzer (GPIO13)
+const int LED_RED_PIN = 12;           // Red LED & buzzer (GPIO12)
+const int BUZZER_GREEN_PIN = 13;      // Shared with green LED
+const int BUZZER_RED_PIN = 12;        // Shared with red LED
+const int IR_SENSOR_PIN = 34;         // IR sensor (GPIO34)
+const int SOLENOID_LOCK_PIN = 27;     // Solenoid lock (GPIO27)
+const int GATE_SENSOR_PIN = 27;       // Gate sensor (GPIO27)
+// PN532 I2C: SDA = GPIO21, SCL = GPIO22 (handled externally)
 
 // Constants
 #define SERVO_OPEN_ANGLE 180
@@ -96,22 +97,24 @@ void setup() {
   inputString.reserve(200);
   
   // Initialize pins
-  pinMode(MOTOR_CTRL_PIN, OUTPUT);
-  pinMode(GATE_SENSOR_PIN_OPEN, INPUT_PULLUP);
-  pinMode(GATE_SENSOR_PIN_CLOSED, INPUT_PULLUP);
+  pinMode(SERVO_PWM_PIN, OUTPUT);
+  pinMode(RELAY_CTRL_PIN, OUTPUT);
+  pinMode(GATE_SENSOR_PIN, INPUT_PULLUP);
   pinMode(IR_SENSOR_PIN, INPUT_PULLUP);
-  pinMode(OCCUPANCY_SENSOR_PIN, INPUT_PULLUP);
   pinMode(LED_GREEN_PIN, OUTPUT);
   pinMode(LED_RED_PIN, OUTPUT);
   pinMode(SOLENOID_LOCK_PIN, OUTPUT);
   
+  // Initialize relay (servo power OFF initially)
+  digitalWrite(RELAY_CTRL_PIN, LOW);
+  
   // Initialize ESP32 servo
   ESP32PWM::allocateTimer(0);
   gateServo.setPeriodHertz(50);  // Standard 50hz servo
-  gateServo.attach(MOTOR_CTRL_PIN, SERVO_MIN_US, SERVO_MAX_US);
+  gateServo.attach(SERVO_PWM_PIN, SERVO_MIN_US, SERVO_MAX_US);
   gateServo.write(SERVO_CLOSED_ANGLE);
   
-  // Configure LEDC for buzzer
+  // Configure LEDC for buzzer (green/red share pins)
   ledc_timer_config_t ledc_timer = {
     .speed_mode = BUZZER_SPEED_MODE,
     .duty_resolution = BUZZER_RESOLUTION,
@@ -121,7 +124,7 @@ void setup() {
   };
   ledc_timer_config(&ledc_timer);
   
-  ledc_channel_config_t ledc_channel = {
+  ledc_channel_config_t ledc_channel_green = {
     .gpio_num = LED_GREEN_PIN,
     .speed_mode = BUZZER_SPEED_MODE,
     .channel = BUZZER_CHANNEL,
@@ -130,15 +133,28 @@ void setup() {
     .duty = 0,
     .hpoint = 0
   };
-  ledc_channel_config(&ledc_channel);
+  ledc_channel_config(&ledc_channel_green);
+  
+  ledc_channel_config_t ledc_channel_red = {
+    .gpio_num = LED_RED_PIN,
+    .speed_mode = BUZZER_SPEED_MODE,
+    .channel = LEDC_CHANNEL_1,
+    .intr_type = LEDC_INTR_DISABLE,
+    .timer_sel = LEDC_TIMER_0,
+    .duty = 0,
+    .hpoint = 0
+  };
+  ledc_channel_config(&ledc_channel_red);
   
   // Initial state
-  digitalWrite(MOTOR_CTRL_PIN, LOW);
+  digitalWrite(SERVO_PWM_PIN, LOW);
   digitalWrite(LED_GREEN_PIN, LOW);
   digitalWrite(LED_RED_PIN, LOW);
   digitalWrite(SOLENOID_LOCK_PIN, HIGH);
   ledc_set_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL, 0);
   ledc_update_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL);
+  ledc_set_duty(BUZZER_SPEED_MODE, LEDC_CHANNEL_1, 0);
+  ledc_update_duty(BUZZER_SPEED_MODE, LEDC_CHANNEL_1);
   
   // Send ready message
   Serial.println("SYSTEM:READY");
@@ -276,20 +292,30 @@ void openGate() {
       unlockGate();
       delay(500);  // Wait for lock to disengage
     }
+    // Power servo via relay
+    digitalWrite(RELAY_CTRL_PIN, HIGH);
+    delay(100); // Allow relay to settle
     updateGateState(OPENING);
     gateServo.write(SERVO_OPEN_ANGLE);
     lastGateMove = millis();
     Serial.println("GATE:OPENING");
+    // Optionally, turn relay OFF after move (if desired)
+    // digitalWrite(RELAY_CTRL_PIN, LOW);
   }
 }
 
 void closeGate() {
   if (currentGateState == OPEN || currentGateState == ERROR_STATE) {
     if (!isOccupied) {
+      // Power servo via relay
+      digitalWrite(RELAY_CTRL_PIN, HIGH);
+      delay(100); // Allow relay to settle
       updateGateState(CLOSING);
       gateServo.write(SERVO_CLOSED_ANGLE);
       lastGateMove = millis();
       Serial.println("GATE:CLOSING");
+      // Optionally, turn relay OFF after move (if desired)
+      // digitalWrite(RELAY_CTRL_PIN, LOW);
     } else {
       Serial.println("NACK:GATE_CLOSE:OCCUPIED");
     }
@@ -333,11 +359,11 @@ void indicateAccessGranted() {
 void indicateAccessDenied() {
   digitalWrite(LED_GREEN_PIN, LOW);
   digitalWrite(LED_RED_PIN, HIGH);
-  ledc_set_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL, 128);
-  ledc_update_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL);
+  ledc_set_duty(BUZZER_SPEED_MODE, LEDC_CHANNEL_1, 128);
+  ledc_update_duty(BUZZER_SPEED_MODE, LEDC_CHANNEL_1);
   delay(500);
-  ledc_set_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL, 0);
-  ledc_update_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL);
+  ledc_set_duty(BUZZER_SPEED_MODE, LEDC_CHANNEL_1, 0);
+  ledc_update_duty(BUZZER_SPEED_MODE, LEDC_CHANNEL_1);
 }
 
 void turnOffLEDs() {
@@ -345,6 +371,8 @@ void turnOffLEDs() {
   digitalWrite(LED_RED_PIN, LOW);
   ledc_set_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL, 0);
   ledc_update_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL);
+  ledc_set_duty(BUZZER_SPEED_MODE, LEDC_CHANNEL_1, 0);
+  ledc_update_duty(BUZZER_SPEED_MODE, LEDC_CHANNEL_1);
 }
 
 void triggerUnauthorizedAlarm() {
@@ -381,7 +409,7 @@ void checkSensors() {
     lastSensorCheck = currentTime;
     
     // Check gate sensor
-    int gateSensorValue = digitalRead(GATE_SENSOR_PIN_OPEN);
+    int gateSensorValue = digitalRead(GATE_SENSOR_PIN);
     if (gateSensorValue == HIGH) {
       gateSensorState = SENSOR_OK;
     } else {
@@ -399,7 +427,7 @@ void checkSensors() {
     }
     
     // Check occupancy sensor
-    int occupancyValue = digitalRead(OCCUPANCY_SENSOR_PIN);
+    int occupancyValue = digitalRead(GATE_SENSOR_PIN);
     if (occupancyValue != 0) { // Assuming 0 means error
       occupancySensorState = SENSOR_OK;
     } else {
@@ -438,14 +466,14 @@ void updateGateState(GateState newState) {
     
     // Update gate state based on sensor readings
     if (currentGateState == OPENING) {
-      if (digitalRead(GATE_SENSOR_PIN_OPEN) == HIGH) {
+      if (digitalRead(GATE_SENSOR_PIN) == HIGH) {
         currentGateState = OPEN;
         isGateOpen = true;
         Serial.println("GATE:OPEN");
       }
     }
     else if (currentGateState == CLOSING) {
-      if (digitalRead(GATE_SENSOR_PIN_CLOSED) == HIGH) {
+      if (digitalRead(GATE_SENSOR_PIN) == HIGH) {
         currentGateState = CLOSED;
         isGateOpen = false;
         Serial.println("GATE:CLOSED");
