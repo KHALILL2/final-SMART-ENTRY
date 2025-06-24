@@ -11,7 +11,7 @@ const int BUZZER_GREEN_PIN = 13;      // Shared with green LED
 const int BUZZER_RED_PIN = 12;        // Shared with red LED
 const int IR_SENSOR_PIN = 34;         // IR sensor (GPIO34)
 const int SOLENOID_LOCK_PIN = 27;     // Solenoid lock (GPIO27)
-const int GATE_SENSOR_PIN = 27;       // Gate sensor (GPIO27)
+const int GATE_SENSOR_PIN = 35;       // Gate sensor (GPIO35)
 // PN532 I2C: SDA = GPIO21, SCL = GPIO22 (handled externally)
 
 // Constants
