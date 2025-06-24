@@ -79,8 +79,8 @@ void checkUnauthorizedAccess();
 void triggerUnauthorizedAlarm();
 void stopAlarm();
 void emergencyStop();
-void indicateAccessGranted();
-void indicateAccessDenied();
+void signalGranted();
+void signalDenied();
 void turnOffLEDs();
 void signalBuzzer(String type);
 
@@ -167,12 +167,12 @@ void loop() {
   // Process serial commands
   if (stringComplete) {
     String command = inputString;
+    command.trim();
     inputString = "";
     stringComplete = false;
     
     if (command == "GATE:STATUS") {
-      Serial.print("GATE:STATUS:");
-      Serial.println(currentGateState);
+      sendGateStatus();
     }
     else if (command == "SENSOR:STATUS") {
       sendSensorStatus();
@@ -180,32 +180,35 @@ void loop() {
     else if (command == "LOCK:STATUS") {
       sendLockStatus();
     }
-    else if (command == "OPEN") {
+    else if (command == "GATE:OPEN" || command == "OPEN") {
       openGate();
     }
-    else if (command == "CLOSE") {
+    else if (command == "GATE:CLOSE" || command == "CLOSE") {
       closeGate();
     }
-    else if (command == "LOCK") {
+    else if (command == "LOCK:ACTIVATE" || command == "LOCK") {
       lockGate();
     }
-    else if (command == "UNLOCK") {
+    else if (command == "LOCK:DEACTIVATE" || command == "UNLOCK") {
       unlockGate();
     }
-    else if (command == "LED:GREEN") {
-      digitalWrite(LED_GREEN_PIN, HIGH);
-      digitalWrite(LED_RED_PIN, LOW);
+    else if (command == "SIGNAL:GRANTED") {
+      signalGranted();
     }
-    else if (command == "LED:RED") {
-      digitalWrite(LED_GREEN_PIN, LOW);
-      digitalWrite(LED_RED_PIN, HIGH);
+    else if (command == "SIGNAL:DENIED") {
+      signalDenied();
     }
-    else if (command == "BUZZER:RED") {
-      ledc_set_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL, 128);
-      ledc_update_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL);
-      delay(500);
-      ledc_set_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL, 0);
-      ledc_update_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL);
+    else if (command == "ALARM:UNAUTHORIZED") {
+      triggerUnauthorizedAlarm();
+    }
+    else if (command == "ALARM:STOP") {
+      stopAlarm();
+    }
+    else if (command == "PING") {
+      Serial.println("PONG");
+    }
+    else if (command == "EMERGENCY:STOP") {
+      emergencyStop();
     }
   }
   
@@ -227,62 +230,6 @@ void serialEvent() {
     } else {
       inputString += inChar;
     }
-  }
-}
-
-void handleCommand(String command) {
-  command.trim();
-  
-  if (command.startsWith("GATE:")) {
-    if (command == "GATE:OPEN") {
-      openGate();
-    } else if (command == "GATE:CLOSE") {
-      closeGate();
-    } else if (command == "GATE:STATUS") {
-      sendGateStatus();
-    }
-  }
-  else if (command.startsWith("LOCK:")) {
-    if (command == "LOCK:ACTIVATE") {
-      lockGate();
-    } else if (command == "LOCK:DEACTIVATE") {
-      unlockGate();
-    }
-  }
-  else if (command.startsWith("LED:")) {
-    if (command == "LED:GREEN") {
-      indicateAccessGranted();
-    } else if (command == "LED:RED") {
-      indicateAccessDenied();
-    } else if (command == "LED:OFF") {
-      turnOffLEDs();
-    }
-  }
-  else if (command.startsWith("ALARM:")) {
-    if (command == "ALARM:UNAUTHORIZED") {
-      triggerUnauthorizedAlarm();
-    } else if (command == "ALARM:STOP") {
-      stopAlarm();
-    }
-  }
-  else if (command.startsWith("STATUS:")) {
-    if (command == "STATUS:GATE") {
-      sendGateStatus();
-    } else if (command == "STATUS:LOCK") {
-      sendLockStatus();
-    } else if (command == "STATUS:SENSORS") {
-      sendSensorStatus();
-    }
-  }
-  else if (command == "PING") {
-    Serial.println("PONG");
-  }
-  else if (command.startsWith("CONFIG:PINS:")) {
-    // Pin configuration is already set in the code
-    Serial.println("CONFIG:OK");
-  }
-  else if (command == "EMERGENCY:STOP") {
-    emergencyStop();
   }
 }
 
@@ -340,30 +287,44 @@ void unlockGate() {
   Serial.println("LOCK:DEACTIVATED");
 }
 
-void indicateAccessGranted() {
-  digitalWrite(LED_GREEN_PIN, HIGH);
-  digitalWrite(LED_RED_PIN, LOW);
-  ledc_set_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL, 128);
-  ledc_update_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL);
-  delay(100);
-  ledc_set_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL, 0);
-  ledc_update_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL);
-  delay(100);
-  ledc_set_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL, 128);
-  ledc_update_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL);
-  delay(100);
-  ledc_set_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL, 0);
-  ledc_update_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL);
-}
-
-void indicateAccessDenied() {
-  digitalWrite(LED_GREEN_PIN, LOW);
+void signalGranted() {
+  // Positive feedback: RED LED for 2s, with beeps
   digitalWrite(LED_RED_PIN, HIGH);
+  digitalWrite(LED_GREEN_PIN, LOW);
+  
+  // Short double beep
   ledc_set_duty(BUZZER_SPEED_MODE, LEDC_CHANNEL_1, 128);
   ledc_update_duty(BUZZER_SPEED_MODE, LEDC_CHANNEL_1);
-  delay(500);
+  delay(150);
   ledc_set_duty(BUZZER_SPEED_MODE, LEDC_CHANNEL_1, 0);
   ledc_update_duty(BUZZER_SPEED_MODE, LEDC_CHANNEL_1);
+  delay(100);
+  ledc_set_duty(BUZZER_SPEED_MODE, LEDC_CHANNEL_1, 128);
+  ledc_update_duty(BUZZER_SPEED_MODE, LEDC_CHANNEL_1);
+  delay(150);
+  ledc_set_duty(BUZZER_SPEED_MODE, LEDC_CHANNEL_1, 0);
+  ledc_update_duty(BUZZER_SPEED_MODE, LEDC_CHANNEL_1);
+  
+  delay(1600); // Wait until 2 seconds have passed in total
+  
+  digitalWrite(LED_RED_PIN, LOW); // Turn LED off
+}
+
+void signalDenied() {
+  // Negative feedback: GREEN LED for 2s, with a long beep
+  digitalWrite(LED_GREEN_PIN, HIGH);
+  digitalWrite(LED_RED_PIN, LOW);
+  
+  // Long beep
+  ledc_set_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL, 128);
+  ledc_update_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL);
+  delay(1000);
+  ledc_set_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL, 0);
+  ledc_update_duty(BUZZER_SPEED_MODE, BUZZER_CHANNEL);
+  
+  delay(1000); // Wait until 2 seconds have passed
+  
+  digitalWrite(LED_GREEN_PIN, LOW); // Turn LED off
 }
 
 void turnOffLEDs() {
