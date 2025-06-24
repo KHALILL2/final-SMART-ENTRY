@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 4.0
+Version: 4.1
 """
 
 import time
@@ -1964,18 +1964,16 @@ class GateControlSystem:
             if access_granted:
                 self.security_manager.log_access(card_id, True)
                 self.card_manager.update_card_usage(card_id)
-                # SWAPPED: Use RED for positive feedback
-                self.esp32.send_command("LED:RED")
-                self.esp32.send_command("BUZZER:RED")
+                # Use a single command for clearer feedback
+                self.esp32.send_command("SIGNAL:GRANTED")
                 if not self.is_gate_open:
                     self.open_gate()
                 else:
                     self.close_gate()
             else:
                 self.security_manager.log_access(card_id, False)
-                # SWAPPED: Use GREEN for negative feedback
-                self.esp32.send_command("LED:GREEN")
-                self.esp32.send_command("BUZZER:GREEN")
+                # Use a single command for clearer feedback
+                self.esp32.send_command("SIGNAL:DENIED")
                 logging.warning(f"Access denied: {reason}")
         except Exception as e:
             logging.error(f"Error handling card: {e}")
