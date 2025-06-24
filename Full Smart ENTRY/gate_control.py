@@ -33,7 +33,7 @@ ESP32 USB Connection:
 
 ESP32 Hardware Connections:
 * Motor Control (Servo) -> GPIO25 (Pin 10)  # Controls gate movement
-* Gate Sensor -> GPIO27 (Pin 12)           # Detects presence
+* Gate Sensor -> GPIO35 (Pin 11)           # Detects presence (MOVED FROM 27)
 * LED Green -> GPIO18 (Pin 30)             # Access granted indicator
 * LED Red -> GPIO19 (Pin 31)               # Access denied indicator
 * Buzzer -> Connected to LED pins          # Audio feedback (shared with LEDs)
@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 4.1
+Version: 4.2
 """
 
 import time
@@ -320,7 +320,7 @@ class ConfigurationManager:
 HARDWARE_PINS = {
     'SERVO_PIN': 25,      # GPIO25 (Pin 10) for servo motor control
     'SOLENOID_PIN': 27,   # GPIO27 (Pin 12) for solenoid lock
-    'GATE_SENSOR_PIN': 27, # GPIO27 (Pin 12) for gate sensor
+    'GATE_SENSOR_PIN': 35, # GPIO35 (Pin 11) for gate sensor (MOVED FROM 27)
     'GREEN_LED_PIN': 18,  # GPIO18 (Pin 30) for green LED
     'RED_LED_PIN': 19,    # GPIO19 (Pin 31) for red LED
     'IR_SENSOR_PIN': 34,  # GPIO34 (Pin 6) for IR sensor
