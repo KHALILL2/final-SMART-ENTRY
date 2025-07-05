@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 4.6
+Version: 4.7
 """
 
 import time
@@ -532,11 +532,18 @@ class ESP32Controller:
                 logging.info(f"CMD -> ESP32: {command}")
             except Exception as e:
                 logging.error(f"Error sending command '{command}' via UART: {e}")
-                self.connected = False
-                self.connection_status = f"Error: {str(e)}"
-                if self.serial:
-                    self.serial.close()
-                    self.serial = None
+                # Don't disconnect immediately for I/O errors
+                if "Input/output error" in str(e) or "Device or resource busy" in str(e):
+                    logging.warning("I/O error on command send, will retry connection")
+                    self.connected = False
+                    self.connection_status = "I/O Error - Reconnecting"
+                else:
+                    # For other errors, disconnect
+                    self.connected = False
+                    self.connection_status = f"Error: {str(e)}"
+                    if self.serial:
+                        self.serial.close()
+                        self.serial = None
 
     def emergency_stop(self):
         """Perform emergency stop of all hardware."""
@@ -656,12 +663,19 @@ class ESP32Controller:
                             self.parse_and_queue_message(line)
                     except UnicodeDecodeError:
                         continue
+                    except Exception as e:
+                        logging.warning(f"Error reading ESP32 data: {e}")
+                        continue
                 time.sleep(0.01)
             except Exception as e:
                 logging.error(f"Error monitoring ESP32 status: {e}")
-                self.connected = False # Assume connection is lost
-                self.connection_status = "Error"
-                time.sleep(0.1)
+                # Don't disconnect immediately, just log the error
+                # Only disconnect if it's a serious error
+                if "Input/output error" in str(e) or "Device or resource busy" in str(e):
+                    logging.warning("I/O error detected, will retry connection")
+                    self.connected = False
+                    self.connection_status = "I/O Error - Reconnecting"
+                time.sleep(1)  # Wait longer before retrying
 
     def parse_and_queue_message(self, message: str):
         """Parse messages from ESP32 and put them in the correct queue."""
