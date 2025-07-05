@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 4.4
+Version: 4.5
 """
 
 import time
@@ -442,20 +442,25 @@ class ESP32Controller:
                 self.serial.reset_input_buffer()
                 self.serial.reset_output_buffer()
                 
-                # Wait for the "SYSTEM:READY" message from the firmware
+                # Try to establish connection by sending a command
+                logging.info("Attempting to establish ESP32 connection...")
+                self.serial.write(b"STATUS:ALL\n")
+                self.serial.flush()
+                
+                # Wait for response
                 start_time = time.time()
-                while time.time() - start_time < 5.0: # 5 second timeout
+                response_received = False
+                
+                while time.time() - start_time < 3.0: # 3 second timeout
                     if self.serial.in_waiting:
                         try:
                             line = self.serial.readline().decode('utf-8').strip()
                             logging.debug(f"ESP32 Init: {line}")
-                            if "SYSTEM:READY" in line:
+                            if line.startswith("STATUS:"):
                                 self.connected = True
                                 self.connection_status = "Connected"
                                 self.reconnect_attempts = 0
-                                logging.info("ESP32 firmware is ready via UART.")
-                                # Request initial status
-                                self.send_command("STATUS:ALL")
+                                logging.info("ESP32 connection established via STATUS response.")
                                 return
                         except UnicodeDecodeError:
                             continue
@@ -463,7 +468,7 @@ class ESP32Controller:
                 
                 # If we get here, connection failed
                 self.connection_status = "No response"
-                self.last_error = "No 'SYSTEM:READY' message received from ESP32"
+                self.last_error = "No STATUS response received from ESP32"
                 logging.error(self.last_error)
                 if self.serial:
                     self.serial.close()
