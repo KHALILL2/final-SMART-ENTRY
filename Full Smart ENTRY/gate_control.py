@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 4.5
+Version: 4.6
 """
 
 import time
@@ -442,18 +442,52 @@ class ESP32Controller:
                 self.serial.reset_input_buffer()
                 self.serial.reset_output_buffer()
                 
+                # Add a small delay to let ESP32 stabilize
+                time.sleep(0.5)
+                
+                # Try simple connection first (just open port)
+                logging.info("Attempting simple ESP32 connection...")
+                try:
+                    # Just test if we can write to the port
+                    self.serial.write(b"\n")
+                    self.serial.flush()
+                    time.sleep(0.1)
+                    
+                    # If no error, assume connection is working
+                    self.connected = True
+                    self.connection_status = "Connected"
+                    self.reconnect_attempts = 0
+                    logging.info("ESP32 connection established (simple mode).")
+                    
+                    # Request initial status
+                    self.send_command("STATUS:ALL")
+                    return
+                    
+                except Exception as e:
+                    logging.error(f"Simple connection failed: {e}")
+                    # Fall back to STATUS:ALL method
+                
                 # Try to establish connection by sending a command
-                logging.info("Attempting to establish ESP32 connection...")
-                self.serial.write(b"STATUS:ALL\n")
-                self.serial.flush()
+                logging.info("Attempting to establish ESP32 connection via STATUS...")
+                try:
+                    self.serial.write(b"STATUS:ALL\n")
+                    self.serial.flush()
+                except Exception as e:
+                    logging.error(f"Error sending STATUS:ALL: {e}")
+                    self.connection_status = "Send error"
+                    self.last_error = f"Failed to send command: {e}"
+                    if self.serial:
+                        self.serial.close()
+                        self.serial = None
+                    return
                 
                 # Wait for response
                 start_time = time.time()
                 response_received = False
                 
                 while time.time() - start_time < 3.0: # 3 second timeout
-                    if self.serial.in_waiting:
-                        try:
+                    try:
+                        if self.serial.in_waiting:
                             line = self.serial.readline().decode('utf-8').strip()
                             logging.debug(f"ESP32 Init: {line}")
                             if line.startswith("STATUS:"):
@@ -462,8 +496,11 @@ class ESP32Controller:
                                 self.reconnect_attempts = 0
                                 logging.info("ESP32 connection established via STATUS response.")
                                 return
-                        except UnicodeDecodeError:
-                            continue
+                    except UnicodeDecodeError:
+                        continue
+                    except Exception as e:
+                        logging.error(f"Error reading response: {e}")
+                        break
                     time.sleep(0.1)
                 
                 # If we get here, connection failed
