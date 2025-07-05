@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 4.3
+Version: 4.4
 """
 
 import time
@@ -414,13 +414,6 @@ class ESP32Controller:
                 self.connected = False
                 self.connection_status = "Connecting..."
                 
-                # Check UART permissions first
-                if not self.check_uart_permissions():
-                    self.connection_status = "UART permission error"
-                    self.last_error = "UART permission error"
-                    logging.error("UART permission error")
-                    return
-                
                 # Close existing connection if any
                 if self.serial and self.serial.is_open:
                     self.serial.close()
@@ -434,10 +427,16 @@ class ESP32Controller:
                         write_timeout=self.config.serial_timeout
                     )
                 except serial.SerialException as e:
-                    self.connection_status = f"UART Error: {str(e)}"
-                    self.last_error = f"Failed to open UART port {SERIAL_PORT}: {e}"
-                    logging.error(self.last_error)
-                    return
+                    if "Permission denied" in str(e):
+                        self.connection_status = "Permission denied - UART access restricted"
+                        self.last_error = f"UART permission denied. Try running with sudo or fix permissions."
+                        logging.error(self.last_error)
+                        return
+                    else:
+                        self.connection_status = f"UART Error: {str(e)}"
+                        self.last_error = f"Failed to open UART port {SERIAL_PORT}: {e}"
+                        logging.error(self.last_error)
+                        return
                 
                 # Clear buffers
                 self.serial.reset_input_buffer()
@@ -1406,6 +1405,8 @@ class GateControlGUI:
             status = self.esp32.connection_status
             if status == "Connected":
                 self.connection_status.config(text="ESP32: Connected", foreground="green")
+            elif "Permission denied" in status:
+                self.connection_status.config(text="ESP32: Permission denied - Run with sudo", foreground="red")
             elif "Error" in status:
                 self.connection_status.config(text=f"ESP32: {status}", foreground="red")
             elif status == "Reconnecting...":
