@@ -158,7 +158,22 @@ def test_uart_connection():
         return response_received
         
     except serial.SerialException as e:
-        print(f"Serial error: {e}")
+        error_msg = str(e)
+        print(f"Serial error: {error_msg}")
+        
+        # Handle permission denied error specifically
+        if "Permission denied" in error_msg or "[Errno 13]" in error_msg:
+            print("\nPERMISSION DENIED - This is a common issue!")
+            print("Solutions:")
+            print("1. Log out and log back in (or reboot):")
+            print("   sudo reboot")
+            print("2. Or try running with sudo (temporary fix):")
+            print("   sudo python3 test_uart_connection.py")
+            print("3. Or fix permissions permanently:")
+            print("   sudo chmod 666 /dev/serial0")
+            print("   sudo chown root:dialout /dev/serial0")
+            print("\nThe dialout group membership requires a logout/login to take effect.")
+        
         return False
     except Exception as e:
         print(f"Unexpected error: {e}")
