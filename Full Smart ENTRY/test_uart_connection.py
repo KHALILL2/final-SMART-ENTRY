@@ -32,6 +32,9 @@ def check_uart_enabled():
             else:
                 print("UART is ENABLED on Raspberry Pi")
                 return True
+        else:
+            print("Could not determine UART status, assuming enabled")
+            return True
     except FileNotFoundError:
         print("raspi-config not found. Assuming UART is enabled.")
         return True
@@ -172,13 +175,19 @@ def main():
     port_exists = check_uart_port()
     permissions_ok = check_user_permissions()
     
+    print()  # Add blank line for clarity
+    
     if not all([uart_enabled, port_exists, permissions_ok]):
         print("Prerequisites not met. Please fix the issues above.")
         return False
     
+    print("All prerequisites met. Testing connection...")
+    print()  # Add blank line for clarity
+    
     # Test connection
     connection_ok = test_uart_connection()
     
+    print()
     print("=" * 40)
     if connection_ok:
         print("UART connection test PASSED!")
