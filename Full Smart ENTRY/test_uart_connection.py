@@ -1,19 +1,9 @@
 #!/usr/bin/env python3
 """
-Simple UART Connection Test for ESP32
-====================================
+ESP32 UART Connection Test
+==========================
 
 This script tests the UART connection between Raspberry Pi and ESP32.
-It helps diagnose connection issues and verify the ESP32 is responding.
-
-Usage:
-    python3 test_uart_connection.py
-
-Hardware Setup:
-    - Connect ESP32 TX to Raspberry Pi GPIO15 (RX)
-    - Connect ESP32 RX to Raspberry Pi GPIO14 (TX)
-    - Connect ESP32 GND to Raspberry Pi GND
-    - Power ESP32 via USB or external power supply
 """
 
 import serial
@@ -34,27 +24,27 @@ def check_uart_enabled():
                               capture_output=True, text=True)
         if result.returncode == 0:
             if result.stdout.strip() == '1':
-                print("[ERROR] UART is DISABLED on Raspberry Pi")
-                print("   Enable UART using: sudo raspi-config")
-                print("   Or run: sudo raspi-config nonint do_serial 0")
+                print("UART is DISABLED on Raspberry Pi")
+                print("Enable UART using: sudo raspi-config")
+                print("Or run: sudo raspi-config nonint do_serial 0")
                 return False
             else:
-                print("[OK] UART is ENABLED on Raspberry Pi")
+                print("UART is ENABLED on Raspberry Pi")
                 return True
     except FileNotFoundError:
-        print("[WARNING] raspi-config not found. Assuming UART is enabled.")
+        print("raspi-config not found. Assuming UART is enabled.")
         return True
     except Exception as e:
-        print(f"[WARNING] Could not check UART status: {e}")
+        print(f"Could not check UART status: {e}")
         return True
 
 def check_uart_port():
     """Check if UART port exists."""
     if os.path.exists(SERIAL_PORT):
-        print(f"[OK] UART port {SERIAL_PORT} exists")
+        print(f"UART port {SERIAL_PORT} exists")
         return True
     else:
-        print(f"[ERROR] UART port {SERIAL_PORT} does not exist")
+        print(f"UART port {SERIAL_PORT} does not exist")
         return False
 
 def check_user_permissions():
@@ -62,20 +52,20 @@ def check_user_permissions():
     try:
         result = subprocess.run(['groups'], capture_output=True, text=True)
         if 'dialout' in result.stdout:
-            print("[OK] User is in dialout group")
+            print("User is in dialout group")
             return True
         else:
-            print("[ERROR] User is NOT in dialout group")
-            print("   Add user to dialout group: sudo usermod -a -G dialout $USER")
-            print("   Then log out and back in")
+            print("User is NOT in dialout group")
+            print("Add user to dialout group: sudo usermod -a -G dialout $USER")
+            print("Then log out and back in")
             return False
     except Exception as e:
-        print(f"[WARNING] Could not check user permissions: {e}")
+        print(f"Could not check user permissions: {e}")
         return False
 
 def test_uart_connection():
     """Test UART connection with ESP32."""
-    print(f"\n[TEST] Testing UART connection to {SERIAL_PORT}...")
+    print(f"Testing UART connection to {SERIAL_PORT}...")
     
     try:
         # Open serial connection
@@ -86,14 +76,14 @@ def test_uart_connection():
             write_timeout=TIMEOUT
         )
         
-        print("[OK] Successfully opened UART port")
+        print("Successfully opened UART port")
         
         # Clear buffers
         ser.reset_input_buffer()
         ser.reset_output_buffer()
         
         # Send PING command
-        print("[SEND] Sending PING command...")
+        print("Sending PING command...")
         ser.write(b"PING\n")
         ser.flush()
         
@@ -105,34 +95,34 @@ def test_uart_connection():
             if ser.in_waiting:
                 try:
                     line = ser.readline().decode('utf-8').strip()
-                    print(f"[RECV] Received: {line}")
+                    print(f"Received: {line}")
                     
                     if "PONG" in line:
-                        print("[OK] ESP32 responded with PONG")
+                        print("ESP32 responded with PONG")
                         response_received = True
                         break
                     elif "SYSTEM:READY" in line:
-                        print("[OK] ESP32 sent SYSTEM:READY")
+                        print("ESP32 sent SYSTEM:READY")
                         response_received = True
                         break
                     elif line:
-                        print(f"[RECV] Other response: {line}")
+                        print(f"Other response: {line}")
                         
                 except UnicodeDecodeError:
-                    print("[WARNING] Received invalid UTF-8 data")
+                    print("Received invalid UTF-8 data")
                     continue
             time.sleep(0.1)
         
         if not response_received:
-            print("[ERROR] No response from ESP32 within 5 seconds")
-            print("   Check:")
-            print("   - ESP32 is powered on")
-            print("   - ESP32 firmware is uploaded")
-            print("   - Wiring is correct (TX->RX, RX->TX, GND->GND)")
-            print("   - ESP32 is not connected via USB to another device")
+            print("No response from ESP32 within 5 seconds")
+            print("Check:")
+            print("- ESP32 is powered on")
+            print("- ESP32 firmware is uploaded")
+            print("- Wiring is correct (TX->RX, RX->TX, GND->GND)")
+            print("- ESP32 is not connected via USB to another device")
         
         # Try to send STATUS:ALL command
-        print("\n[SEND] Sending STATUS:ALL command...")
+        print("Sending STATUS:ALL command...")
         ser.write(b"STATUS:ALL\n")
         ser.flush()
         
@@ -145,28 +135,28 @@ def test_uart_connection():
                 try:
                     line = ser.readline().decode('utf-8').strip()
                     if line.startswith("STATUS:"):
-                        print(f"[RECV] Status: {line}")
+                        print(f"Status: {line}")
                         status_count += 1
                 except UnicodeDecodeError:
                     continue
             time.sleep(0.1)
         
         if status_count > 0:
-            print(f"[OK] Received {status_count} status messages")
+            print(f"Received {status_count} status messages")
         else:
-            print("[WARNING] No status messages received")
+            print("No status messages received")
         
         # Close connection
         ser.close()
-        print("[OK] UART connection closed")
+        print("UART connection closed")
         
         return response_received
         
     except serial.SerialException as e:
-        print(f"[ERROR] Serial error: {e}")
+        print(f"Serial error: {e}")
         return False
     except Exception as e:
-        print(f"[ERROR] Unexpected error: {e}")
+        print(f"Unexpected error: {e}")
         return False
 
 def main():
@@ -175,26 +165,26 @@ def main():
     print("=" * 40)
     
     # Check prerequisites
-    print("\n[CHECK] Checking prerequisites...")
+    print("Checking prerequisites...")
     uart_enabled = check_uart_enabled()
     port_exists = check_uart_port()
     permissions_ok = check_user_permissions()
     
     if not all([uart_enabled, port_exists, permissions_ok]):
-        print("\n[ERROR] Prerequisites not met. Please fix the issues above.")
+        print("Prerequisites not met. Please fix the issues above.")
         return False
     
     # Test connection
     connection_ok = test_uart_connection()
     
-    print("\n" + "=" * 40)
+    print("=" * 40)
     if connection_ok:
-        print("[SUCCESS] UART connection test PASSED!")
-        print("   ESP32 is responding correctly via UART")
+        print("UART connection test PASSED!")
+        print("ESP32 is responding correctly via UART")
         return True
     else:
-        print("[FAILED] UART connection test FAILED!")
-        print("   Please check the hardware connections and ESP32 firmware")
+        print("UART connection test FAILED!")
+        print("Please check the hardware connections and ESP32 firmware")
         return False
 
 if __name__ == "__main__":
