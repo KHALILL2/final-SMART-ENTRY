@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 4.9
+Version: 5.0
 """
 
 import time
@@ -407,7 +407,7 @@ class ESP32Controller:
         pass
 
     def connect_esp32(self) -> None:
-        """Connect to ESP32 controller via UART with improved error handling."""
+        """Connect to ESP32 controller via UART with improved stability."""
         with self.connection_lock:
             try:
                 # Reset connection state
@@ -418,6 +418,7 @@ class ESP32Controller:
                 if self.serial and self.serial.is_open:
                     try:
                         self.serial.close()
+                        time.sleep(0.2)  # Give port time to close
                     except Exception as e:
                         logging.warning(f"Error closing existing connection: {e}")
                 
@@ -428,7 +429,11 @@ class ESP32Controller:
                             port=SERIAL_PORT,
                             baudrate=self.config.baud_rate,
                             timeout=self.config.serial_timeout,
-                            write_timeout=self.config.serial_timeout
+                            write_timeout=self.config.serial_timeout,
+                            # Add these parameters for better stability
+                            exclusive=False,  # Allow other processes to access
+                            rtscts=False,     # Disable hardware flow control
+                            dsrdtr=False      # Disable hardware flow control
                         )
                         logging.info(f"UART port opened successfully on attempt {attempt + 1}")
                         break
@@ -445,25 +450,26 @@ class ESP32Controller:
                             return
                         else:
                             logging.warning(f"UART open attempt {attempt + 1} failed: {e}")
-                            time.sleep(0.5)
+                            time.sleep(1.0)  # Longer delay between attempts
                 
                 # Clear buffers
                 try:
                     self.serial.reset_input_buffer()
                     self.serial.reset_output_buffer()
+                    time.sleep(0.1)  # Brief pause after clearing
                 except Exception as e:
                     logging.warning(f"Error clearing buffers: {e}")
                 
-                # Add a small delay to let ESP32 stabilize
-                time.sleep(0.5)
+                # Add a longer delay to let ESP32 stabilize
+                time.sleep(1.0)
                 
                 # Try simple connection first (just open port)
                 logging.info("Attempting simple ESP32 connection...")
                 try:
-                    # Just test if we can write to the port
+                    # Send a simple newline to test connection
                     self.serial.write(b"\n")
                     self.serial.flush()
-                    time.sleep(0.1)
+                    time.sleep(0.2)
                     
                     # If no error, assume connection is working
                     self.connected = True
@@ -471,13 +477,19 @@ class ESP32Controller:
                     self.reconnect_attempts = 0
                     logging.info("ESP32 connection established (simple mode).")
                     
-                    # Request initial status
-                    try:
-                        self.serial.write(b"STATUS:ALL\n")
-                        self.serial.flush()
-                        logging.info("Initial STATUS:ALL command sent")
-                    except Exception as e:
-                        logging.warning(f"Error sending initial STATUS:ALL: {e}")
+                    # Send initial status request with retry
+                    for retry in range(3):
+                        try:
+                            self.serial.write(b"STATUS:ALL\n")
+                            self.serial.flush()
+                            logging.info("Initial STATUS:ALL command sent")
+                            break
+                        except Exception as e:
+                            logging.warning(f"Error sending initial STATUS:ALL (attempt {retry + 1}): {e}")
+                            if retry < 2:
+                                time.sleep(0.5)
+                            else:
+                                logging.error("Failed to send initial STATUS:ALL after 3 attempts")
                     
                     return
                     
@@ -538,30 +550,59 @@ class ESP32Controller:
                     self.serial = None
 
     def send_command(self, command: str) -> None:
-        """Sends a 'fire-and-forget' command to the ESP32 via UART."""
+        """Sends a 'fire-and-forget' command to the ESP32 via UART with improved stability."""
         with self.connection_lock:
             if not self.connected or not self.serial or not self.serial.is_open:
                 logging.warning(f"ESP32 not connected via UART. Cannot send command: {command}")
                 return
             
-            try:
-                self.serial.write(f"{command}\n".encode('utf-8'))
-                self.serial.flush()
-                logging.info(f"CMD -> ESP32: {command}")
-            except Exception as e:
-                logging.error(f"Error sending command '{command}' via UART: {e}")
-                # Don't disconnect immediately for I/O errors
-                if "Input/output error" in str(e) or "Device or resource busy" in str(e):
-                    logging.warning("I/O error on command send, will retry connection")
-                    self.connected = False
-                    self.connection_status = "I/O Error - Reconnecting"
-                else:
-                    # For other errors, disconnect
-                    self.connected = False
-                    self.connection_status = f"Error: {str(e)}"
-                    if self.serial:
-                        self.serial.close()
-                        self.serial = None
+            # Add command to queue for retry if needed
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    # Clear any pending input before sending
+                    if self.serial.in_waiting > 0:
+                        self.serial.reset_input_buffer()
+                    
+                    # Send command with proper formatting
+                    command_bytes = f"{command}\n".encode('utf-8')
+                    self.serial.write(command_bytes)
+                    self.serial.flush()
+                    
+                    # Brief pause to let ESP32 process
+                    time.sleep(0.1)
+                    
+                    logging.info(f"CMD -> ESP32: {command}")
+                    return  # Success, exit retry loop
+                    
+                except Exception as e:
+                    error_msg = str(e)
+                    logging.warning(f"Error sending command '{command}' (attempt {attempt + 1}): {error_msg}")
+                    
+                    # Handle different error types
+                    if "Input/output error" in error_msg or "Device or resource busy" in error_msg:
+                        if attempt < max_retries - 1:
+                            logging.info(f"Retrying command in 0.5 seconds...")
+                            time.sleep(0.5)
+                            continue
+                        else:
+                            logging.error("I/O error on command send after retries, will retry connection")
+                            self.connected = False
+                            self.connection_status = "I/O Error - Reconnecting"
+                    elif "Broken pipe" in error_msg or "Connection reset" in error_msg:
+                        logging.error("Connection lost during command send")
+                        self.connected = False
+                        self.connection_status = "Connection Lost - Reconnecting"
+                        break
+                    else:
+                        # For other errors, don't retry
+                        logging.error(f"Command send failed: {error_msg}")
+                        self.connected = False
+                        self.connection_status = f"Error: {error_msg}"
+                        if self.serial:
+                            self.serial.close()
+                            self.serial = None
+                        break
 
     def emergency_stop(self):
         """Perform emergency stop of all hardware."""
@@ -640,25 +681,36 @@ class ESP32Controller:
             return False
 
     def monitor_connection(self):
-        """Monitor UART connection status."""
+        """Monitor UART connection status with improved reconnection logic."""
+        last_reconnect_attempt = 0
+        reconnect_cooldown = 5  # Minimum seconds between reconnection attempts
+        
         while self.running:
             try:
+                current_time = time.time()
+                
                 if not self.connected:
-                    time.sleep(self.config.uart_check_interval)
-                    if self.reconnect_attempts < self.config.max_reconnect_attempts:
-                        logging.info(f"Attempting to reconnect to ESP32 via UART (Attempt {self.reconnect_attempts + 1}/{self.config.max_reconnect_attempts})")
-                        self.connect_esp32()
-                        self.reconnect_attempts += 1
+                    # Check if enough time has passed since last reconnection attempt
+                    if current_time - last_reconnect_attempt >= reconnect_cooldown:
+                        if self.reconnect_attempts < self.config.max_reconnect_attempts:
+                            logging.info(f"Attempting to reconnect to ESP32 via UART (Attempt {self.reconnect_attempts + 1}/{self.config.max_reconnect_attempts})")
+                            self.connect_esp32()
+                            self.reconnect_attempts += 1
+                            last_reconnect_attempt = current_time
+                        else:
+                            # Don't log continuously
+                            if self.connection_status != "Connection Failed":
+                               self.connection_status = "Connection Failed"
+                               logging.error(f"Max reconnection attempts reached. Check ESP32 UART connection.")
+                            time.sleep(15)  # Wait longer before trying again
+                            self.reconnect_attempts = 0  # Reset after waiting
                     else:
-                        # Don't log continuously
-                        if self.connection_status != "Connection Failed":
-                           self.connection_status = "Connection Failed"
-                           logging.error(f"Max reconnection attempts reached. Check ESP32 UART connection.")
-                        time.sleep(10)  # Wait longer before trying again
-                        self.reconnect_attempts = 0  # Reset after waiting
+                        # Wait for cooldown period
+                        time.sleep(1)
                 else:
-                     # If connected, just sleep. The status monitor will detect a disconnect.
-                     time.sleep(self.config.uart_check_interval)
+                    # If connected, just sleep. The status monitor will detect a disconnect.
+                    time.sleep(self.config.uart_check_interval)
+                    
             except Exception as e:
                 logging.error(f"Error in UART connection monitoring: {e}")
                 time.sleep(5)  # Wait longer on errors
@@ -668,9 +720,11 @@ class ESP32Controller:
         pass
     
     def monitor_status_from_esp32(self):
-        """Monitor status updates from ESP32 with improved error handling."""
+        """Monitor status updates from ESP32 with improved stability."""
         consecutive_errors = 0
         last_successful_read = time.time()
+        last_ping_time = time.time()
+        ping_interval = 15.0  # Send ping every 15 seconds if no data
         
         while self.running:
             if not self.connected or not self.serial or not self.serial.is_open:
@@ -697,12 +751,14 @@ class ESP32Controller:
                         consecutive_errors += 1
                         continue
                 
-                # Check if we haven't received any data for a while
-                if time.time() - last_successful_read > 10.0:  # 10 seconds without data
-                    logging.debug("No data received from ESP32 for 10 seconds, sending ping")
+                # Send periodic ping if no data received
+                current_time = time.time()
+                if current_time - last_successful_read > ping_interval and current_time - last_ping_time > ping_interval:
+                    logging.debug("No data received, sending ping")
                     try:
                         self.serial.write(b"STATUS:ALL\n")
                         self.serial.flush()
+                        last_ping_time = current_time
                     except Exception as e:
                         logging.warning(f"Error sending ping: {e}")
                         consecutive_errors += 1
@@ -714,15 +770,16 @@ class ESP32Controller:
                 error_msg = str(e)
                 logging.error(f"Error monitoring ESP32 status: {error_msg}")
                 
-                # Handle different types of errors
+                # Handle different types of errors with different thresholds
                 if "Input/output error" in error_msg or "Device or resource busy" in error_msg:
-                    logging.warning("I/O error detected, will attempt reconnection")
-                    # Don't disconnect immediately, give it a few more tries
-                    if consecutive_errors >= 5:  # Increased threshold for I/O errors
+                    logging.warning("I/O error detected")
+                    # Be more tolerant of I/O errors - they're often temporary
+                    if consecutive_errors >= 10:  # Much higher threshold for I/O errors
+                        logging.warning("Multiple I/O errors detected, will attempt reconnection")
                         self.connected = False
                         self.connection_status = "I/O Error - Reconnecting"
                         consecutive_errors = 0  # Reset counter
-                        time.sleep(1)  # Brief pause before reconnection
+                        time.sleep(2)  # Longer pause before reconnection
                 elif "Broken pipe" in error_msg or "Connection reset" in error_msg:
                     logging.warning("Connection lost, will reconnect")
                     self.connected = False
