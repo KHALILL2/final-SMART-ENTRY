@@ -13,7 +13,7 @@ import os
 import sys
 
 # UART Configuration
-SERIAL_PORT = '/dev/serial0'
+SERIAL_PORT = '/dev/ttyS0'
 BAUD_RATE = 115200
 TIMEOUT = 2
 
