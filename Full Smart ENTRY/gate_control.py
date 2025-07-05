@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 5.0
+Version: 5.1
 """
 
 import time
@@ -1678,6 +1678,7 @@ class GateControlSystem:
         self.card_cooldown = self.security_config.card_cooldown
         self.last_card_id: Optional[str] = None
         self.system_ready = False
+        self.running = True
         
         # System health monitoring
         self.system_health = {
