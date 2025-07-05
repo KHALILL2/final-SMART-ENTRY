@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 4.7
+Version: 4.8
 """
 
 import time
@@ -636,12 +636,14 @@ class ESP32Controller:
                         if self.connection_status != "Connection Failed":
                            self.connection_status = "Connection Failed"
                            logging.error(f"Max reconnection attempts reached. Check ESP32 UART connection.")
+                        time.sleep(10)  # Wait longer before trying again
+                        self.reconnect_attempts = 0  # Reset after waiting
                 else:
                      # If connected, just sleep. The status monitor will detect a disconnect.
                      time.sleep(self.config.uart_check_interval)
             except Exception as e:
                 logging.error(f"Error in UART connection monitoring: {e}")
-                time.sleep(1)
+                time.sleep(5)  # Wait longer on errors
 
     def process_commands(self):
         """This function is no longer needed with the fire-and-forget model."""
@@ -649,6 +651,7 @@ class ESP32Controller:
     
     def monitor_status_from_esp32(self):
         """Monitor status updates from ESP32."""
+        consecutive_errors = 0
         while self.running:
             if not self.connected or not self.serial or not self.serial.is_open:
                 time.sleep(0.5)
@@ -661,21 +664,30 @@ class ESP32Controller:
                         if line:
                             logging.debug(f"ESP32 Raw: {line}")
                             self.parse_and_queue_message(line)
+                            consecutive_errors = 0  # Reset error counter on successful read
                     except UnicodeDecodeError:
                         continue
                     except Exception as e:
                         logging.warning(f"Error reading ESP32 data: {e}")
+                        consecutive_errors += 1
                         continue
                 time.sleep(0.01)
             except Exception as e:
+                consecutive_errors += 1
                 logging.error(f"Error monitoring ESP32 status: {e}")
-                # Don't disconnect immediately, just log the error
-                # Only disconnect if it's a serious error
-                if "Input/output error" in str(e) or "Device or resource busy" in str(e):
-                    logging.warning("I/O error detected, will retry connection")
-                    self.connected = False
-                    self.connection_status = "I/O Error - Reconnecting"
-                time.sleep(1)  # Wait longer before retrying
+                # Only disconnect after multiple consecutive errors
+                if consecutive_errors >= 3:
+                    if "Input/output error" in str(e) or "Device or resource busy" in str(e):
+                        logging.warning("Multiple I/O errors detected, will retry connection")
+                        self.connected = False
+                        self.connection_status = "I/O Error - Reconnecting"
+                        consecutive_errors = 0  # Reset counter
+                    else:
+                        logging.error("Multiple errors detected, disconnecting")
+                        self.connected = False
+                        self.connection_status = "Error"
+                        consecutive_errors = 0  # Reset counter
+                time.sleep(2)  # Wait longer before retrying
 
     def parse_and_queue_message(self, message: str):
         """Parse messages from ESP32 and put them in the correct queue."""
