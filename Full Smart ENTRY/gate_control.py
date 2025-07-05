@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 4.8
+Version: 4.9
 """
 
 import time
@@ -416,31 +416,43 @@ class ESP32Controller:
                 
                 # Close existing connection if any
                 if self.serial and self.serial.is_open:
-                    self.serial.close()
+                    try:
+                        self.serial.close()
+                    except Exception as e:
+                        logging.warning(f"Error closing existing connection: {e}")
                 
-                # Create UART connection
-                try:
-                    self.serial = serial.Serial(
-                        port=SERIAL_PORT,
-                        baudrate=self.config.baud_rate,
-                        timeout=self.config.serial_timeout,
-                        write_timeout=self.config.serial_timeout
-                    )
-                except serial.SerialException as e:
-                    if "Permission denied" in str(e):
-                        self.connection_status = "Permission denied - UART access restricted"
-                        self.last_error = f"UART permission denied. Try running with sudo or fix permissions."
-                        logging.error(self.last_error)
-                        return
-                    else:
-                        self.connection_status = f"UART Error: {str(e)}"
-                        self.last_error = f"Failed to open UART port {SERIAL_PORT}: {e}"
-                        logging.error(self.last_error)
-                        return
+                # Create UART connection with retry
+                for attempt in range(3):
+                    try:
+                        self.serial = serial.Serial(
+                            port=SERIAL_PORT,
+                            baudrate=self.config.baud_rate,
+                            timeout=self.config.serial_timeout,
+                            write_timeout=self.config.serial_timeout
+                        )
+                        logging.info(f"UART port opened successfully on attempt {attempt + 1}")
+                        break
+                    except serial.SerialException as e:
+                        if "Permission denied" in str(e):
+                            self.connection_status = "Permission denied - UART access restricted"
+                            self.last_error = f"UART permission denied. Try running with sudo or fix permissions."
+                            logging.error(self.last_error)
+                            return
+                        elif attempt == 2:  # Last attempt
+                            self.connection_status = f"UART Error: {str(e)}"
+                            self.last_error = f"Failed to open UART port {SERIAL_PORT}: {e}"
+                            logging.error(self.last_error)
+                            return
+                        else:
+                            logging.warning(f"UART open attempt {attempt + 1} failed: {e}")
+                            time.sleep(0.5)
                 
                 # Clear buffers
-                self.serial.reset_input_buffer()
-                self.serial.reset_output_buffer()
+                try:
+                    self.serial.reset_input_buffer()
+                    self.serial.reset_output_buffer()
+                except Exception as e:
+                    logging.warning(f"Error clearing buffers: {e}")
                 
                 # Add a small delay to let ESP32 stabilize
                 time.sleep(0.5)
@@ -460,7 +472,13 @@ class ESP32Controller:
                     logging.info("ESP32 connection established (simple mode).")
                     
                     # Request initial status
-                    self.send_command("STATUS:ALL")
+                    try:
+                        self.serial.write(b"STATUS:ALL\n")
+                        self.serial.flush()
+                        logging.info("Initial STATUS:ALL command sent")
+                    except Exception as e:
+                        logging.warning(f"Error sending initial STATUS:ALL: {e}")
+                    
                     return
                     
                 except Exception as e:
@@ -481,7 +499,7 @@ class ESP32Controller:
                         self.serial = None
                     return
                 
-                # Wait for response
+                # Wait for response with better error handling
                 start_time = time.time()
                 response_received = False
                 
@@ -650,14 +668,17 @@ class ESP32Controller:
         pass
     
     def monitor_status_from_esp32(self):
-        """Monitor status updates from ESP32."""
+        """Monitor status updates from ESP32 with improved error handling."""
         consecutive_errors = 0
+        last_successful_read = time.time()
+        
         while self.running:
             if not self.connected or not self.serial or not self.serial.is_open:
                 time.sleep(0.5)
                 continue
             
             try:
+                # Check if there's data to read
                 if self.serial.in_waiting:
                     try:
                         line = self.serial.readline().decode('utf-8').strip()
@@ -665,28 +686,57 @@ class ESP32Controller:
                             logging.debug(f"ESP32 Raw: {line}")
                             self.parse_and_queue_message(line)
                             consecutive_errors = 0  # Reset error counter on successful read
+                            last_successful_read = time.time()
                     except UnicodeDecodeError:
+                        # Handle invalid UTF-8 data gracefully
+                        logging.debug("Received invalid UTF-8 data, skipping")
+                        consecutive_errors += 1
                         continue
                     except Exception as e:
                         logging.warning(f"Error reading ESP32 data: {e}")
                         consecutive_errors += 1
                         continue
-                time.sleep(0.01)
+                
+                # Check if we haven't received any data for a while
+                if time.time() - last_successful_read > 10.0:  # 10 seconds without data
+                    logging.debug("No data received from ESP32 for 10 seconds, sending ping")
+                    try:
+                        self.serial.write(b"STATUS:ALL\n")
+                        self.serial.flush()
+                    except Exception as e:
+                        logging.warning(f"Error sending ping: {e}")
+                        consecutive_errors += 1
+                
+                time.sleep(0.01)  # Small delay to prevent busy waiting
+                
             except Exception as e:
                 consecutive_errors += 1
-                logging.error(f"Error monitoring ESP32 status: {e}")
-                # Only disconnect after multiple consecutive errors
-                if consecutive_errors >= 3:
-                    if "Input/output error" in str(e) or "Device or resource busy" in str(e):
-                        logging.warning("Multiple I/O errors detected, will retry connection")
+                error_msg = str(e)
+                logging.error(f"Error monitoring ESP32 status: {error_msg}")
+                
+                # Handle different types of errors
+                if "Input/output error" in error_msg or "Device or resource busy" in error_msg:
+                    logging.warning("I/O error detected, will attempt reconnection")
+                    # Don't disconnect immediately, give it a few more tries
+                    if consecutive_errors >= 5:  # Increased threshold for I/O errors
                         self.connected = False
                         self.connection_status = "I/O Error - Reconnecting"
                         consecutive_errors = 0  # Reset counter
-                    else:
+                        time.sleep(1)  # Brief pause before reconnection
+                elif "Broken pipe" in error_msg or "Connection reset" in error_msg:
+                    logging.warning("Connection lost, will reconnect")
+                    self.connected = False
+                    self.connection_status = "Connection Lost - Reconnecting"
+                    consecutive_errors = 0
+                    time.sleep(1)
+                else:
+                    # For other errors, be more aggressive about disconnecting
+                    if consecutive_errors >= 3:
                         logging.error("Multiple errors detected, disconnecting")
                         self.connected = False
                         self.connection_status = "Error"
-                        consecutive_errors = 0  # Reset counter
+                        consecutive_errors = 0
+                
                 time.sleep(2)  # Wait longer before retrying
 
     def parse_and_queue_message(self, message: str):
