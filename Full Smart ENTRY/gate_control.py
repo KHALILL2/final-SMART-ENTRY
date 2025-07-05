@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 4.2
+Version: 4.3
 """
 
 import time
@@ -115,8 +115,8 @@ SERIAL_PORT = '/dev/serial0'  # UART port for Pi <-> ESP32 (GPIO14 TX, GPIO15 RX
 BAUD_RATE = 115200
 SERIAL_TIMEOUT = 1
 
-# USB connection settings
-USB_CHECK_INTERVAL = 5  # Seconds between USB connection checks
+# UART connection settings
+UART_CHECK_INTERVAL = 5  # Seconds between UART connection checks
 MAX_RECONNECT_ATTEMPTS = 3
 RECONNECT_DELAY = 2  # Seconds between reconnection attempts
 
@@ -133,7 +133,7 @@ DEFAULT_CONFIG = {
     'hardware': {
         'baud_rate': 115200,
         'serial_timeout': 1,
-        'usb_check_interval': 5,
+        'uart_check_interval': 5,
         'max_reconnect_attempts': 3,
         'reconnect_delay': 2
     },
@@ -144,18 +144,25 @@ DEFAULT_CONFIG = {
     }
 }
 
-# Define enums for better type safety
-class SecurityLevel(Enum):
-    NORMAL = auto()
-    HIGH = auto()
-    EMERGENCY = auto()
-
+# Define enums for better type safety and to match firmware
 class GateState(Enum):
-    CLOSED = auto()
-    OPENING = auto()
-    OPEN = auto()
-    CLOSING = auto()
-    ERROR = auto()
+    CLOSED = "CLOSED"
+    OPENING = "OPENING"
+    OPEN = "OPEN"
+    CLOSING = "CLOSING"
+    STOPPED = "STOPPED"
+    ERROR = "ERROR"
+    UNKNOWN = "UNKNOWN"
+
+class LockState(Enum):
+    LOCKED = "LOCKED"
+    UNLOCKED = "UNLOCKED"
+    UNKNOWN = "UNKNOWN"
+
+class SecurityLevel(Enum):
+    NORMAL = "NORMAL"
+    HIGH = "HIGH"
+    EMERGENCY = "EMERGENCY"
 
 @dataclass
 class SecurityConfig:
@@ -169,7 +176,7 @@ class SecurityConfig:
 class HardwareConfig:
     baud_rate: int
     serial_timeout: int
-    usb_check_interval: int
+    uart_check_interval: int
     max_reconnect_attempts: int
     reconnect_delay: int
 
@@ -253,7 +260,7 @@ class ConfigurationManager:
             # Hardware section
             self.config['hardware']['baud_rate'] = int(self.config['hardware']['baud_rate'])
             self.config['hardware']['serial_timeout'] = int(self.config['hardware']['serial_timeout'])
-            self.config['hardware']['usb_check_interval'] = int(self.config['hardware']['usb_check_interval'])
+            self.config['hardware']['uart_check_interval'] = int(self.config['hardware']['uart_check_interval'])
             self.config['hardware']['max_reconnect_attempts'] = int(self.config['hardware']['max_reconnect_attempts'])
             self.config['hardware']['reconnect_delay'] = int(self.config['hardware']['reconnect_delay'])
             
@@ -297,7 +304,7 @@ class ConfigurationManager:
         return HardwareConfig(
             baud_rate=hw_config['baud_rate'],
             serial_timeout=hw_config['serial_timeout'],
-            usb_check_interval=hw_config['usb_check_interval'],
+            uart_check_interval=hw_config['uart_check_interval'],
             max_reconnect_attempts=hw_config['max_reconnect_attempts'],
             reconnect_delay=hw_config['reconnect_delay']
         )
@@ -338,28 +345,34 @@ class ESP32Controller:
         self.connected = False
         self.command_queue: queue.Queue[str] = queue.Queue()
         self.status_queue: queue.Queue[str] = queue.Queue()
+        self.event_queue: queue.Queue[str] = queue.Queue()
         self.connection_lock = threading.Lock()
         
-        # State variables
-        self.gate_state = GateState.CLOSED
-        self.actual_lock_state = "UNKNOWN"
-        self.unauthorized_detected = False
-        self.is_occupied = False
+        # State variables, updated by status messages
+        self.gate_state = GateState.UNKNOWN
+        self.lock_state = LockState.UNKNOWN
         
-        # Connection monitoring variables
+        # Connection monitoring
         self.last_connection_check = time.time()
         self.reconnect_attempts = 0
         self.connection_status = "Disconnected"
-        self.last_error = None
+        self.last_error = ""
+        
+        # Diagnostics and firmware info
         self.connection_diagnostics = {
             'port_found': False,
             'permissions_ok': False,
             'connection_attempted': False,
+            'ping_successful': False,
             'last_error': None
         }
         
-        # Initialize hardware pins
-        self.initialize_hardware()
+        self.firmware_info = {
+            'version': '',
+            'protocol_version': '',
+            'is_compatible': False,
+            'last_verified': ''
+        }
         
         # Start monitoring threads
         self.running = True
@@ -369,27 +382,9 @@ class ESP32Controller:
         self.connect_esp32()
 
     def initialize_hardware(self) -> None:
-        """Initialize hardware pins and send configuration to ESP32."""
-        try:
-            # Send pin configuration to ESP32
-            pin_config = {
-                'SERVO': HARDWARE_PINS['SERVO_PIN'],
-                'SOLENOID': HARDWARE_PINS['SOLENOID_PIN'],
-                'GATE_SENSOR': HARDWARE_PINS['GATE_SENSOR_PIN'],
-                'GREEN_LED': HARDWARE_PINS['GREEN_LED_PIN'],
-                'RED_LED': HARDWARE_PINS['RED_LED_PIN'],
-                'IR_SENSOR': HARDWARE_PINS['IR_SENSOR_PIN']
-            }
-            
-            # Convert pin configuration to command
-            pin_config_cmd = "CONFIG:PINS:" + ",".join([f"{k}={v}" for k, v in pin_config.items()])
-            logging.info(f"Sending pin configuration: {pin_config_cmd}")
-            
-            # Store configuration for later use
-            self.pin_config = pin_config
-            
-        except Exception as e:
-            logging.error(f"Error initializing hardware: {e}")
+        # This is now handled by the ESP32 firmware's initial state
+        logging.info("Hardware initialization is managed by the ESP32 firmware.")
+        pass
 
     def start_monitoring_threads(self):
         """
@@ -398,8 +393,7 @@ class ESP32Controller:
         threads = [
             (self.process_commands, "Command Processing"),
             (self.monitor_status_from_esp32, "Status Monitoring"),
-            (self.monitor_connection, "Connection Monitoring"),
-            (self.monitor_hardware, "Hardware Monitoring")
+            (self.monitor_connection, "Connection Monitoring")
         ]
         
         for target, name in threads:
@@ -409,131 +403,69 @@ class ESP32Controller:
             logging.info(f"Started {name} thread")
 
     def monitor_hardware(self):
-        """
-        Monitor hardware status and health.
-        """
-        while self.running:
-            try:
-                if self.connected:
-                    # Check motor status
-                    self.send_command("STATUS:MOTOR")
-                    # Check sensor status
-                    self.send_command("STATUS:SENSORS")
-                    # Check power status
-                    self.send_command("STATUS:POWER")
-                time.sleep(5)
-            except Exception as e:
-                logging.error(f"Error in hardware monitoring: {e}")
-                time.sleep(1)
+        # This is now handled by the ESP32 firmware
+        pass
 
     def connect_esp32(self) -> None:
-        """Connect to ESP32 controller with improved error handling."""
+        """Connect to ESP32 controller via UART with improved error handling."""
         with self.connection_lock:
             try:
                 # Reset connection state
                 self.connected = False
                 self.connection_status = "Connecting..."
                 
-                # Find ESP32 port
-                port = self.get_esp32_port()
-                if not port:
-                    self.connection_status = "No device found"
-                    self.last_error = "No ESP32 device found"
-                    logging.error("No ESP32 device found")
-                    return
-                
-                # Check USB permissions
-                if not self.check_usb_permissions(port):
-                    self.connection_status = "Permission error"
-                    self.last_error = "USB permission error"
-                    logging.error("USB permission error")
+                # Check UART permissions first
+                if not self.check_uart_permissions():
+                    self.connection_status = "UART permission error"
+                    self.last_error = "UART permission error"
+                    logging.error("UART permission error")
                     return
                 
                 # Close existing connection if any
                 if self.serial and self.serial.is_open:
                     self.serial.close()
                 
-                # Create serial connection with retry
-                for attempt in range(3):
-                    try:
-                        self.serial = serial.Serial(
-                            port=port,
-                            baudrate=self.config.baud_rate,
-                            timeout=self.config.serial_timeout,
-                            write_timeout=self.config.serial_timeout
-                        )
-                        break
-                    except serial.SerialException as e:
-                        if attempt == 2:  # Last attempt
-                            raise
-                        time.sleep(0.5)
-                
-                # Reset the device
-                self.serial.setDTR(False)
-                time.sleep(0.1)
-                self.serial.setDTR(True)
-                time.sleep(0.5)
+                # Create UART connection
+                try:
+                    self.serial = serial.Serial(
+                        port=SERIAL_PORT,
+                        baudrate=self.config.baud_rate,
+                        timeout=self.config.serial_timeout,
+                        write_timeout=self.config.serial_timeout
+                    )
+                except serial.SerialException as e:
+                    self.connection_status = f"UART Error: {str(e)}"
+                    self.last_error = f"Failed to open UART port {SERIAL_PORT}: {e}"
+                    logging.error(self.last_error)
+                    return
                 
                 # Clear buffers
                 self.serial.reset_input_buffer()
                 self.serial.reset_output_buffer()
                 
-                # Send pin configuration
-                pin_config_cmd = "CONFIG:PINS:" + ",".join([f"{k}={v}" for k, v in self.pin_config.items()])
-                self.serial.write(f"{pin_config_cmd}\n".encode('utf-8'))
-                self.serial.flush()
-                time.sleep(0.5)
-                
-                # Send reset command
-                self.serial.write(b"RESET\n")
-                self.serial.flush()
-                time.sleep(0.5)
-                
-                # Wait for startup message with timeout and debug output
+                # Wait for the "SYSTEM:READY" message from the firmware
                 start_time = time.time()
-                debug_messages = []
-                while time.time() - start_time < 3.0:  # Increased timeout to 3 seconds
+                while time.time() - start_time < 5.0: # 5 second timeout
                     if self.serial.in_waiting:
                         try:
                             line = self.serial.readline().decode('utf-8').strip()
-                            debug_messages.append(line)
-                            logging.debug(f"Received from ESP32: {line}")
-                            
+                            logging.debug(f"ESP32 Init: {line}")
                             if "SYSTEM:READY" in line:
                                 self.connected = True
                                 self.connection_status = "Connected"
                                 self.reconnect_attempts = 0
-                                self.last_error = None
-                                logging.info("ESP32 connected successfully")
-                                # Turn off LED after connection
-                                self.send_command("LED:OFF")
+                                logging.info("ESP32 firmware is ready via UART.")
+                                # Request initial status
+                                self.send_command("STATUS:ALL")
                                 return
-                            elif "ERROR" in line:
-                                self.last_error = f"ESP32 reported error: {line}"
-                                break
                         except UnicodeDecodeError:
-                            debug_messages.append("Invalid UTF-8 data received")
                             continue
                     time.sleep(0.1)
                 
                 # If we get here, connection failed
                 self.connection_status = "No response"
-                self.last_error = "No startup message received"
-                logging.error("No startup message received from ESP32")
-                logging.error(f"Debug messages received: {debug_messages}")
-                
-                # Try to get any error messages
-                try:
-                    self.serial.write(b"STATUS:ERROR\n")
-                    self.serial.flush()
-                    time.sleep(0.5)
-                    if self.serial.in_waiting:
-                        error_msg = self.serial.readline().decode('utf-8').strip()
-                        if error_msg:
-                            self.last_error = f"ESP32 error: {error_msg}"
-                except:
-                    pass
-                
+                self.last_error = "No 'SYSTEM:READY' message received from ESP32"
+                logging.error(self.last_error)
                 if self.serial:
                     self.serial.close()
                     self.serial = None
@@ -541,145 +473,74 @@ class ESP32Controller:
             except Exception as e:
                 self.connection_status = f"Error: {str(e)}"
                 self.last_error = str(e)
-                logging.error(f"Error connecting to ESP32: {e}")
+                logging.error(f"Error connecting to ESP32 via UART: {e}")
                 if self.serial:
                     self.serial.close()
                     self.serial = None
 
-    def send_command(self, command: str, response_timeout: Optional[float] = None) -> Union[str, bool]:
-        """Send a command to the ESP32 controller with improved error handling."""
+    def send_command(self, command: str) -> None:
+        """Sends a 'fire-and-forget' command to the ESP32 via UART."""
         with self.connection_lock:
             if not self.connected or not self.serial or not self.serial.is_open:
-                logging.warning(f"ESP32 not connected. Cannot send command: {command}")
-                self.connection_status = "Disconnected"
-                return False
+                logging.warning(f"ESP32 not connected via UART. Cannot send command: {command}")
+                return
             
             try:
-                # Clear input buffer before sending command
-                self.serial.reset_input_buffer()
-                
-                # Ensure command ends with newline
-                if not command.endswith('\n'):
-                    command = f"{command}\n"
-                
-                # Send command with retry
-                for attempt in range(3):
-                    try:
-                        self.serial.write(command.encode('utf-8'))
-                        self.serial.flush()
-                        break
-                    except serial.SerialException as e:
-                        if attempt == 2:  # Last attempt
-                            raise
-                        time.sleep(0.1)
-                
-                logging.info(f"Sending command to ESP32: {command.strip()}")
-                
-                if response_timeout:
-                    start_time = time.time()
-                    while time.time() - start_time < response_timeout:
-                        if self.serial.in_waiting:
-                            try:
-                                response = self.serial.readline().decode('utf-8').strip()
-                                if response:
-                                    logging.info(f"Received response from ESP32: {response}")
-                                    return response
-                            except UnicodeDecodeError:
-                                continue
-                        time.sleep(0.01)
-                    logging.warning(f"Timeout waiting for response to command: {command.strip()}")
-                    return False
-                return True
-                
+                self.serial.write(f"{command}\n".encode('utf-8'))
+                self.serial.flush()
+                logging.info(f"CMD -> ESP32: {command}")
             except Exception as e:
-                logging.error(f"Error sending command '{command.strip()}': {e}")
+                logging.error(f"Error sending command '{command}' via UART: {e}")
                 self.connected = False
                 self.connection_status = f"Error: {str(e)}"
-                self.last_error = str(e)
                 if self.serial:
                     self.serial.close()
                     self.serial = None
-                return False
 
     def emergency_stop(self):
-        """
-        Perform emergency stop of all hardware.
-        """
-        try:
-            # Stop all motors
-            self.send_command("EMERGENCY:STOP")
-            # Lock the gate
-            self.lock_gate()
-            # Turn off all outputs
-            self.send_command("OUTPUT:OFF")
-            logging.warning("Emergency stop activated")
-        except Exception as e:
-            logging.error(f"Error during emergency stop: {e}")
+        """Perform emergency stop of all hardware."""
+        self.send_command("EMERGENCY:STOP")
+        logging.warning("Emergency stop command sent via UART.")
 
     def get_esp32_port(self) -> Optional[str]:
         """
-        Find the ESP32 USB port with enhanced diagnostics.
+        For UART connection, we use a fixed port.
         
         Returns:
-            Optional[str]: The port name if found, None otherwise
+            str: The UART port name
         """
-        try:
-            # List all available ports
-            ports = serial.tools.list_ports.comports()
-            
-            if not ports:
-                logging.error("No USB devices detected. Please check USB connections.")
-                return None
-                
-            logging.info("Available USB devices:")
-            for port in ports:
-                logging.info(f"Device: {port.device}, Description: {port.description}, Hardware ID: {port.hwid}")
-            
-            # Try to find ESP32 port with more detailed logging
-            for port in ports:
-                # Common ESP32 USB identifiers
-                if any(identifier in str(port.description).upper() for identifier in ['CP210', 'CH340', 'SILICON LABS', 'ESP32']):
-                    logging.info(f"Found potential ESP32 device: {port.device}")
-                    logging.info(f"Device details: {port.description}")
-                    logging.info(f"Hardware ID: {port.hwid}")
-                    
-                    # Try to open the port to verify it's working
-                    try:
-                        test_serial = serial.Serial(
-                            port=port.device,
-                            baudrate=self.config.baud_rate,
-                            timeout=1
-                        )
-                        test_serial.close()
-                        logging.info(f"Successfully verified port {port.device}")
-                        return port.device
-                    except Exception as e:
-                        logging.warning(f"Port {port.device} found but could not be opened: {e}")
-                        continue
-                    
-            logging.warning("No ESP32 device found. Please ensure ESP32 is connected and recognized.")
-            return None
-            
-        except Exception as e:
-            logging.error(f"Error finding ESP32 port: {e}")
-            return None
+        return SERIAL_PORT
 
-    def check_usb_permissions(self, port: str) -> bool:
+    def check_uart_permissions(self) -> bool:
         """
-        Check and fix USB permissions with enhanced diagnostics.
+        Check UART permissions and enable UART if needed.
         
         Returns:
-            bool: True if permissions are correct
+            bool: True if UART is accessible
         """
         try:
+            # Check if UART is enabled in config
+            result = subprocess.run(['raspi-config', 'nonint', 'get_serial'], 
+                                  capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout.strip() == '1':
+                logging.warning("UART is disabled. Attempting to enable...")
+                try:
+                    # Enable UART
+                    subprocess.run(['raspi-config', 'nonint', 'do_serial', '0'], check=True)
+                    logging.info("UART enabled. Please reboot the Raspberry Pi.")
+                    return False
+                except subprocess.CalledProcessError as e:
+                    logging.error(f"Failed to enable UART: {e}")
+                    return False
+            
             # Check if port exists
-            if not os.path.exists(port):
-                logging.error(f"Port {port} does not exist")
+            if not os.path.exists(SERIAL_PORT):
+                logging.error(f"UART port {SERIAL_PORT} does not exist")
                 return False
 
             # Check port permissions
-            port_stat = os.stat(port)
-            logging.info(f"Port {port} permissions: {oct(port_stat.st_mode)}")
+            port_stat = os.stat(SERIAL_PORT)
+            logging.info(f"UART port {SERIAL_PORT} permissions: {oct(port_stat.st_mode)}")
             
             # Check if user is in dialout group
             result = subprocess.run(['groups'], capture_output=True, text=True)
@@ -694,95 +555,50 @@ class ESP32Controller:
                     logging.error("Please run: sudo usermod -a -G dialout $USER")
                     return False
                     
-            # Try to open port with different permissions
+            # Try to open port to verify it's working
             try:
                 test_serial = serial.Serial(
-                    port=port,
+                    port=SERIAL_PORT,
                     baudrate=self.config.baud_rate,
                     timeout=1
                 )
                 test_serial.close()
-                logging.info(f"Successfully verified port {port} permissions")
+                logging.info(f"Successfully verified UART port {SERIAL_PORT}")
                 return True
             except Exception as e:
-                logging.error(f"Failed to open port {port}: {e}")
+                logging.error(f"Failed to open UART port {SERIAL_PORT}: {e}")
                 return False
                 
         except Exception as e:
-            logging.error(f"Error checking USB permissions: {e}")
+            logging.error(f"Error checking UART permissions: {e}")
             return False
 
     def monitor_connection(self):
-        """Monitor USB connection status with improved error handling."""
+        """Monitor UART connection status."""
         while self.running:
             try:
-                current_time = time.time()
-                if current_time - self.last_connection_check >= self.config.usb_check_interval:
-                    self.last_connection_check = current_time
-                    
-                    if not self.connected:
-                        if self.reconnect_attempts < self.config.max_reconnect_attempts:
-                            logging.info(f"Attempting to reconnect to ESP32 (Attempt {self.reconnect_attempts + 1}/{self.config.max_reconnect_attempts})")
-                            self.connection_status = "Reconnecting..."
-                            self.connect_esp32()
-                            self.reconnect_attempts += 1
-                        else:
-                            self.connection_status = f"Connection failed: {self.last_error}"
-                            logging.error(f"Max reconnection attempts reached. Last error: {self.last_error}")
+                if not self.connected:
+                    time.sleep(self.config.uart_check_interval)
+                    if self.reconnect_attempts < self.config.max_reconnect_attempts:
+                        logging.info(f"Attempting to reconnect to ESP32 via UART (Attempt {self.reconnect_attempts + 1}/{self.config.max_reconnect_attempts})")
+                        self.connect_esp32()
+                        self.reconnect_attempts += 1
                     else:
-                        # Verify connection is still active
-                        try:
-                            if not self.serial or not self.serial.is_open:
-                                raise Exception("Serial port not open")
-                            
-                            # Send ping command
-                            self.serial.write(b"PING\n")
-                            self.serial.flush()
-                            
-                            # Wait for response
-                            start_time = time.time()
-                            while time.time() - start_time < 1.0:
-                                if self.serial.in_waiting:
-                                    try:
-                                        response = self.serial.readline().decode().strip()
-                                        if response:
-                                            self.connection_status = "Connected"
-                                            break
-                                    except UnicodeDecodeError:
-                                        continue
-                                time.sleep(0.01)
-                            else:
-                                raise Exception("No response to ping")
-                                
-                        except Exception as e:
-                            logging.warning(f"Lost connection to ESP32: {e}")
-                            self.connected = False
-                            self.connection_status = f"Disconnected: {str(e)}"
-                            self.last_error = str(e)
-                            self.reconnect_attempts = 0
-                            if self.serial:
-                                self.serial.close()
-                                self.serial = None
-                
-                time.sleep(1)
+                        # Don't log continuously
+                        if self.connection_status != "Connection Failed":
+                           self.connection_status = "Connection Failed"
+                           logging.error(f"Max reconnection attempts reached. Check ESP32 UART connection.")
+                else:
+                     # If connected, just sleep. The status monitor will detect a disconnect.
+                     time.sleep(self.config.uart_check_interval)
             except Exception as e:
-                logging.error(f"Error in connection monitoring: {e}")
+                logging.error(f"Error in UART connection monitoring: {e}")
                 time.sleep(1)
 
     def process_commands(self):
-        """Process commands from the command queue."""
-        while self.running:
-            try:
-                command = self.command_queue.get(timeout=0.1)
-                if command:
-                    response = self.send_command(command, response_timeout=1.0)
-                    if response:
-                        self.status_queue.put(f"RESPONSE:{command}:{response}")
-            except queue.Empty:
-                continue
-            except Exception as e:
-                logging.error(f"Error processing command: {e}")
-
+        """This function is no longer needed with the fire-and-forget model."""
+        pass
+    
     def monitor_status_from_esp32(self):
         """Monitor status updates from ESP32."""
         while self.running:
@@ -795,14 +611,43 @@ class ESP32Controller:
                     try:
                         line = self.serial.readline().decode('utf-8').strip()
                         if line:
-                            logging.info(f"ESP32 Status: {line}")
-                            self.status_queue.put(line)
+                            logging.debug(f"ESP32 Raw: {line}")
+                            self.parse_and_queue_message(line)
                     except UnicodeDecodeError:
                         continue
                 time.sleep(0.01)
             except Exception as e:
                 logging.error(f"Error monitoring ESP32 status: {e}")
+                self.connected = False # Assume connection is lost
+                self.connection_status = "Error"
                 time.sleep(0.1)
+
+    def parse_and_queue_message(self, message: str):
+        """Parse messages from ESP32 and put them in the correct queue."""
+        parts = message.split(':')
+        msg_type = parts[0]
+
+        if msg_type == "STATUS":
+            try:
+                component = parts[1]
+                state = parts[2]
+                if component == "GATE":
+                    self.gate_state = GateState(state)
+                elif component == "LOCK":
+                    self.lock_state = LockState(state)
+                self.status_queue.put(message)
+            except (IndexError, ValueError):
+                logging.warning(f"Could not parse status message: {message}")
+        
+        elif msg_type == "EVENT":
+            self.event_queue.put(message)
+
+        # ACK/NACK are handled by send_command, so we can ignore them here
+        elif msg_type in ["ACK", "NACK", "PONG", "SYSTEM"]:
+            pass # Ignore async messages that are handled elsewhere
+        
+        else:
+            logging.debug(f"Unhandled message from ESP32: {message}")
 
     def cleanup(self):
         """
@@ -815,9 +660,11 @@ class ESP32Controller:
         if self.serial and self.serial.is_open:
             try:
                 logging.info("Attempting to gracefully close and lock gate via ESP32 before shutdown...")
-                if self.gate_state not in [GateState.CLOSED, GateState.CLOSING, GateState.ERROR]:
+                if self.gate_state not in [GateState.CLOSED, GateState.STOPPED, GateState.ERROR]:
                     self.send_command("GATE:CLOSE")
-                time.sleep(0.5)
+                    time.sleep(0.5) # Give it a moment
+                self.send_command("LOCK:ACTIVATE")
+                time.sleep(0.1)
                 self.serial.close()
                 logging.info("ESP32 serial port closed.")
             except Exception as e:
@@ -826,49 +673,22 @@ class ESP32Controller:
         logging.info("ESP32Controller cleanup finished.")
 
     def lock_gate(self):
-        """
-        Activates the solenoid lock to secure the gate.
-        """
-        if not self.connected or not self.serial:
-            logging.warning("Cannot lock gate: ESP32 not connected or serial not initialized")
-            return
-        
-        try:
-            self.send_command("LOCK:ACTIVATE")
-            logging.info("Gate mechanism locked")
-        except Exception as e:
-            logging.error(f"Error locking gate: {e}")
+        """Activates the solenoid lock to secure the gate."""
+        self.send_command("LOCK:ACTIVATE")
 
     def unlock_gate(self):
-        """
-        Deactivates the solenoid lock to allow gate movement.
-        """
-        if not self.connected or not self.serial:
-            logging.warning("Cannot unlock gate: ESP32 not connected or serial not initialized")
-            return
-        
-        try:
-            self.send_command("LOCK:DEACTIVATE")
-            logging.info("Gate mechanism unlocked")
-        except Exception as e:
-            logging.error(f"Error unlocking gate: {e}")
+        """Deactivates the solenoid lock to allow gate movement."""
+        self.send_command("LOCK:DEACTIVATE")
 
     def trigger_unauthorized_alarm(self):
-        """
-        Triggers the alarm for unauthorized access.
-        """
-        self.unauthorized_detected = True
-        self.send_command("ALARM:UNAUTHORIZED")
-        logging.warning("Unauthorized access alarm triggered")
+        # The ESP32 now handles this automatically via the IR sensor
+        logging.info("Unauthorized alarm is now triggered automatically by firmware.")
+        pass
 
     def stop_unauthorized_alarm(self):
-        """
-        Stops the unauthorized access alarm.
-        """
-        if self.unauthorized_detected:
-            self.send_command("ALARM:STOP")
-            self.unauthorized_detected = False
-            logging.info("Unauthorized access alarm stopped")
+        # Alarm is stopped via EMERGENCY:STOP or RESET
+        logging.info("Alarm can be stopped with an EMERGENCY:STOP command.")
+        pass
 
     def run_diagnostics(self) -> Dict[str, Any]:
         """
@@ -879,9 +699,9 @@ class ESP32Controller:
         """
         logging.info("Running ESP32 connection diagnostics...")
         
-        # Check USB devices
+        # Check UART devices
         ports = serial.tools.list_ports.comports()
-        logging.info("Available USB devices:")
+        logging.info("Available UART devices:")
         for port in ports:
             logging.info(f"Device: {port.device}, Description: {port.description}, Hardware ID: {port.hwid}")
         
@@ -891,7 +711,7 @@ class ESP32Controller:
         
         if esp32_port:
             # Check permissions
-            self.connection_diagnostics['permissions_ok'] = self.check_usb_permissions(esp32_port)
+            self.connection_diagnostics['permissions_ok'] = self.check_uart_permissions()
             
             # Try to open port
             try:
@@ -1559,42 +1379,6 @@ class GateControlGUI:
         self.lock_status = ttk.Label(self.status_frame, text="Lock: Unknown", foreground="gray")
         self.lock_status.pack(anchor=tk.W, padx=5, pady=2)
         
-        # Health monitoring frame
-        self.health_frame = ttk.LabelFrame(self.main_frame, text="System Health", padding="5")
-        self.health_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        # Component Health Indicators
-        self.component_health = {
-            'nfc_reader': {'label': ttk.Label(self.health_frame, text="NFC Reader: Unknown"), 'status': "Unknown"},
-            'esp32': {'label': ttk.Label(self.health_frame, text="ESP32: Unknown"), 'status': "Unknown"},
-            'gate_sensors': {'label': ttk.Label(self.health_frame, text="Gate Sensors: Unknown"), 'status': "Unknown"},
-            'lock_mechanism': {'label': ttk.Label(self.health_frame, text="Lock Mechanism: Unknown"), 'status': "Unknown"}
-        }
-        
-        # Layout health indicators
-        row = 0
-        for component, data in self.component_health.items():
-            data['label'].grid(row=row, column=0, padx=5, pady=2, sticky=tk.W)
-            row += 1
-        
-        # System metrics frame
-        self.metrics_frame = ttk.LabelFrame(self.main_frame, text="System Metrics", padding="5")
-        self.metrics_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        # System metrics
-        self.system_metrics = {
-            'temperature': {'label': ttk.Label(self.metrics_frame, text="Temperature: --°C"), 'value': 0},
-            'power': {'label': ttk.Label(self.metrics_frame, text="Power: --V"), 'value': 0},
-            'memory': {'label': ttk.Label(self.metrics_frame, text="Memory: --%"), 'value': 0},
-            'uptime': {'label': ttk.Label(self.metrics_frame, text="Uptime: --:--:--"), 'value': 0}
-        }
-        
-        # Layout metrics
-        row = 0
-        for metric, data in self.system_metrics.items():
-            data['label'].grid(row=row, column=0, padx=5, pady=2, sticky=tk.W)
-            row += 1
-        
         # Control buttons frame
         self.control_frame = ttk.LabelFrame(self.main_frame, text="Gate Controls", padding="5")
         self.control_frame.pack(fill=tk.X, padx=5, pady=5)
@@ -1630,85 +1414,51 @@ class GateControlGUI:
                 self.connection_status.config(text=f"ESP32: {status}", foreground="red")
             
             # Update gate status
-            gate_state = self.esp32.gate_state.name
-            if gate_state == "OPEN":
-                self.gate_status.config(text="Gate: Open", foreground="green")
-            elif gate_state == "CLOSED":
-                self.gate_status.config(text="Gate: Closed", foreground="blue")
-            elif gate_state == "OPENING":
-                self.gate_status.config(text="Gate: Opening...", foreground="orange")
-            elif gate_state == "CLOSING":
-                self.gate_status.config(text="Gate: Closing...", foreground="orange")
+            gate_state = self.esp32.gate_state
+            if gate_state in [GateState.OPEN, GateState.OPENING]:
+                self.gate_status.config(text=f"Gate: {gate_state.value}", foreground="green")
+            elif gate_state in [GateState.CLOSED, GateState.CLOSING]:
+                self.gate_status.config(text=f"Gate: {gate_state.value}", foreground="blue")
+            elif gate_state == GateState.STOPPED:
+                self.gate_status.config(text="Gate: STOPPED", foreground="orange")
             else:
-                self.gate_status.config(text="Gate: Error", foreground="red")
+                self.gate_status.config(text=f"Gate: {gate_state.value}", foreground="red")
             
             # Update lock status
-            lock_state = self.esp32.actual_lock_state
-            if lock_state == "LOCKED":
+            lock_state = self.esp32.lock_state
+            if lock_state == LockState.LOCKED:
                 self.lock_status.config(text="Lock: Locked", foreground="blue")
-            elif lock_state == "UNLOCKED":
+            elif lock_state == LockState.UNLOCKED:
                 self.lock_status.config(text="Lock: Unlocked", foreground="green")
             else:
                 self.lock_status.config(text="Lock: Unknown", foreground="gray")
             
-            # Update component health
-            system_health = self.esp32.get_system_health()
-            for component, data in self.component_health.items():
-                status = system_health[component]['status']
-                if status == "OK":
-                    data['label'].config(text=f"{component.replace('_', ' ').title()}: OK", foreground="green")
-                elif status == "Error":
-                    data['label'].config(text=f"{component.replace('_', ' ').title()}: Error", foreground="red")
-                else:
-                    data['label'].config(text=f"{component.replace('_', ' ').title()}: Unknown", foreground="gray")
-            
-            # Update system metrics
-            metrics = self.esp32.get_system_metrics()
-            for metric, data in self.system_metrics.items():
-                if metric in metrics:
-                    value = metrics[metric]
-                    if metric == 'temperature':
-                        data['label'].config(text=f"Temperature: {value}°C")
-                    elif metric == 'power':
-                        data['label'].config(text=f"Power: {value}V")
-                    elif metric == 'memory':
-                        data['label'].config(text=f"Memory: {value}%")
-                    elif metric == 'uptime':
-                        data['label'].config(text=f"Uptime: {value}")
-            
         except Exception as e:
-            logging.error(f"Error updating status: {e}")
+            logging.error(f"Error updating GUI status: {e}")
         
         # Schedule next update
         self.root.after(1000, self.update_status)
     
     def open_gate(self):
-        """Open the gate."""
-        try:
-            self.esp32.send_command("OPEN")
-        except Exception as e:
-            logging.error(f"Error opening gate: {e}")
-    
+        """Unlock and then open the gate."""
+        logging.info("GUI: Requesting gate open sequence.")
+        # The new firmware handles the sequence. We just need to unlock, then open.
+        self.esp32.unlock_gate()
+        time.sleep(0.5) # Give the physical lock time to disengage
+        self.esp32.send_command("GATE:OPEN")
+
     def close_gate(self):
         """Close the gate."""
-        try:
-            self.esp32.send_command("CLOSE")
-        except Exception as e:
-            logging.error(f"Error closing gate: {e}")
+        logging.info("GUI: Requesting gate close.")
+        self.esp32.send_command("GATE:CLOSE")
     
     def lock_gate(self):
         """Lock the gate."""
-        try:
-            self.esp32.send_command("LOCK")
-        except Exception as e:
-            logging.error(f"Error locking gate: {e}")
+        self.esp32.lock_gate()
     
     def unlock_gate(self):
         """Unlock the gate."""
-        try:
-            self.esp32.send_command("UNLOCK")
-        except Exception as e:
-            logging.error(f"Error unlocking gate: {e}")
+        self.esp32.unlock_gate()
 
 class GateControlSystem:
     """
@@ -1781,16 +1531,8 @@ class GateControlSystem:
                 self.system_health['nfc_reader']['status'] = 'Error'
                 return
             
-            # Ensure gate is locked on startup
-            self.esp32.lock_gate()
-            time.sleep(0.5)  # Wait for lock to engage
-            
-            # Request initial status from ESP32
-            self.esp32.send_command("GATE:STATUS")
-            
-            # Update system health
-            self.system_health['esp32']['status'] = 'OK'
-            self.system_health['nfc_reader']['status'] = 'OK'
+            # Request status from ESP32 to ensure it's responsive
+            self.esp32.send_command("STATUS:ALL")
             
             self.system_ready = True
             logging.info("Gate control system initialized and ready")
@@ -1846,42 +1588,16 @@ class GateControlSystem:
         Continuously monitors for NFC cards and processes them.
         """
         logging.info("Starting gate control system")
-        last_health_check = 0
-        health_check_interval = 30  # Check system health every 30 seconds
         
         try:
-            while True:
-                current_time = time.time()
-                
-                # Periodic system health check
-                if current_time - last_health_check >= health_check_interval:
-                    self.check_system_health()
-                    last_health_check = current_time
-                
-                # Check for status updates from ESP32
-                try:
-                    status = self.esp32.status_queue.get_nowait()
-                    if "OCCUPIED" in status:
-                        self.is_occupied = True
-                    elif "CLEAR" in status:
-                        self.is_occupied = False
-                        if self.is_gate_open:
-                            self.close_gate()
-                    elif "UNAUTHORIZED" in status:
-                        self.handle_unauthorized_access()
-                    elif "SENSOR:ERROR" in status:
-                        self.system_health['gate_sensors']['status'] = 'Error'
-                    elif "LOCK:ERROR" in status:
-                        self.system_health['lock_mechanism']['status'] = 'Error'
-                except queue.Empty:
-                    pass
-
+            while self.running:
                 # Check for NFC cards
                 card_id = self.read_nfc()
                 if card_id:
                     self.handle_card(card_id)
                 
-                time.sleep(0.05)
+                # The rest of the logic is now event-driven from ESP32 status messages
+                time.sleep(0.1)
 
         except KeyboardInterrupt:
             logging.info("Shutting down system")
@@ -1935,9 +1651,6 @@ class GateControlSystem:
         """
         Handle an NFC card read.
         Processes the card and controls the gate accordingly.
-        
-        Args:
-            card_id (str): The ID of the detected card
         """
         if not self.system_ready:
             logging.warning("System not ready, cannot handle card")
@@ -1947,54 +1660,52 @@ class GateControlSystem:
             logging.error("Invalid card ID type")
             return
         
+        # Prevent rapid-fire card scans
         current_time = time.time()
-        if current_time - self.last_card_time < self.card_cooldown:
+        if current_time - self.last_card_time < self.security_config.card_cooldown:
             return
-
         self.last_card_time = current_time
-        self.last_card_id = card_id
         
         try:
             # Check card authorization
             access_granted, reason = self.security_manager.check_access(card_id)
-            
-            # Log card scan
             self.card_manager.log_card_scan(card_id, access_granted)
             
             if access_granted:
                 self.security_manager.log_access(card_id, True)
                 self.card_manager.update_card_usage(card_id)
-                # Use a single command for clearer feedback
-                self.esp32.send_command("SIGNAL:GRANTED")
-                if not self.is_gate_open:
-                    self.open_gate()
-                else:
-                    self.close_gate()
+                
+                logging.info(f"Access granted for card {card_id}. Triggering automatic gate operation.")
+                
+                # Automatic operation
+                if self.esp32.gate_state == GateState.CLOSED:
+                    logging.info("Card access: Gate is CLOSED, opening now.")
+                    # Use a thread to avoid blocking the main loop
+                    threading.Thread(target=self._handle_automatic_open, daemon=True).start()
+                elif self.esp32.gate_state == GateState.OPEN:
+                    logging.info("Card access: Gate is OPEN, closing now.")
+                    self.esp32.send_command("GATE:CLOSE")
+
             else:
                 self.security_manager.log_access(card_id, False)
-                # Use a single command for clearer feedback
-                self.esp32.send_command("SIGNAL:DENIED")
-                logging.warning(f"Access denied: {reason}")
+                # The firmware now automatically provides feedback for denied actions.
+                # No dummy command is needed here anymore.
+                logging.warning(f"Access denied for card {card_id}: {reason}.")
         except Exception as e:
             logging.error(f"Error handling card: {e}")
 
+    def _handle_automatic_open(self):
+        """A non-blocking handler for the gate open sequence."""
+        self.esp32.unlock_gate()
+        time.sleep(0.5) # Give the physical lock time to disengage
+        self.esp32.send_command("GATE:OPEN")
+
     def handle_unauthorized_access(self) -> None:
         """
-        Handle unauthorized access detection.
-        Triggers security measures and logging.
+        This is now handled by the ESP32 firmware, which will send an
+        EVENT:UNAUTHORIZED message. The GUI will display a warning.
         """
-        if not self.system_ready:
-            logging.warning("System not ready, cannot handle unauthorized access")
-            return
-            
-        try:
-            if self.security_manager.log_unauthorized_access():
-                self.esp32.trigger_unauthorized_alarm()
-                # Lock the gate if it's open
-                if self.is_gate_open:
-                    self.close_gate()
-        except Exception as e:
-            logging.error(f"Error handling unauthorized access: {e}")
+        pass
 
     def get_system_health(self) -> dict:
         """
