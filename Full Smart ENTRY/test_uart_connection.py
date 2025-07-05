@@ -20,6 +20,7 @@ TIMEOUT = 2
 def check_uart_enabled():
     """Check if UART is enabled on Raspberry Pi."""
     try:
+        # Try to check if UART is enabled by looking at the config
         result = subprocess.run(['raspi-config', 'nonint', 'get_serial'], 
                               capture_output=True, text=True)
         if result.returncode == 0:
@@ -36,6 +37,7 @@ def check_uart_enabled():
         return True
     except Exception as e:
         print(f"Could not check UART status: {e}")
+        print("Assuming UART is enabled and continuing...")
         return True
 
 def check_uart_port():
