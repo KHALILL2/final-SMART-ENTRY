@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 5.1
+Version: 5.2
 """
 
 import time
@@ -723,8 +723,8 @@ class ESP32Controller:
         """Monitor status updates from ESP32 with improved stability."""
         consecutive_errors = 0
         last_successful_read = time.time()
-        last_ping_time = time.time()
-        ping_interval = 15.0  # Send ping every 15 seconds if no data
+        last_status_request = time.time()
+        status_interval = 5.0  # Request status every 5 seconds
         
         while self.running:
             if not self.connected or not self.serial or not self.serial.is_open:
@@ -751,16 +751,16 @@ class ESP32Controller:
                         consecutive_errors += 1
                         continue
                 
-                # Send periodic ping if no data received
+                # Request status periodically to keep GUI updated
                 current_time = time.time()
-                if current_time - last_successful_read > ping_interval and current_time - last_ping_time > ping_interval:
-                    logging.debug("No data received, sending ping")
+                if current_time - last_status_request > status_interval:
+                    logging.debug("Requesting status update")
                     try:
                         self.serial.write(b"STATUS:ALL\n")
                         self.serial.flush()
-                        last_ping_time = current_time
+                        last_status_request = current_time
                     except Exception as e:
-                        logging.warning(f"Error sending ping: {e}")
+                        logging.warning(f"Error requesting status: {e}")
                         consecutive_errors += 1
                 
                 time.sleep(0.01)  # Small delay to prevent busy waiting
