@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 5.7
+Version: 5.8
 """
 
 import time
@@ -1614,10 +1614,28 @@ class GateControlGUI:
             self.close_button.config(state=tk.NORMAL)
             self.lock_button.config(state=tk.NORMAL)
             self.unlock_button.config(state=tk.NORMAL)
+            # Check for feedback from ESP32 and show popup/status
+            self.check_for_feedback()
         except Exception as e:
             logging.error(f"Error updating GUI status: {e}")
         # Schedule next update
         self.root.after(1000, self.update_status)
+    
+    def check_for_feedback(self):
+        """Show feedback popups/status for ACK/NACK from ESP32."""
+        try:
+            while not self.esp32.status_queue.empty():
+                msg = self.esp32.status_queue.get_nowait()
+                if msg.startswith("ACK"):
+                    # Positive feedback: green popup
+                    messagebox.showinfo("Success", msg)
+                    # Optionally, update a status label in green
+                elif msg.startswith("NACK"):
+                    # Negative feedback: red popup
+                    messagebox.showwarning("Command Not Supported", msg)
+                    # Optionally, update a status label in red
+        except Exception as e:
+            logging.error(f"Error checking for feedback: {e}")
     
     def open_gate(self):
         """Send open command and show any NACK/error."""
