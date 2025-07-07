@@ -40,12 +40,16 @@ ESP32 Hardware Connections:
 * IR Sensor -> GPIO34 (Pin 6)              # Detects unauthorized access
 * Solenoid Lock -> GPIO27 (Pin 12)         # Locks gate mechanism
 
-# --- SERVO SPINNING WARNING ---
-# If you do NOT use a relay or power switch for the servo, the servo will receive power as soon as the system is powered on.
-# This may cause the servo to spin or jitter at boot until the ESP32 firmware starts and attaches the servo.
-# To minimize this effect, ensure the ESP32 firmware attaches the servo and sets it to a known position as early as possible.
-# For best results, add a 10kΩ pull-down resistor from the servo signal pin (GPIO25) to GND.
-# The only way to guarantee no spinning at boot is to use a relay or MOSFET to control servo power.
+# IMPORTANT: SERVO SPINNING AT BOOT (NO RELAY)
+# --------------------------------------------
+# With this wiring (servo VCC always powered, signal on GPIO25, GND shared):
+# - The servo may spin or twitch at boot until the ESP32 firmware starts and attaches the servo.
+# - This is a hardware limitation of most hobby servos.
+# - To minimize this effect:
+#     1. Attach the servo and set to a known position as early as possible in firmware setup().
+#     2. Set GPIO25 LOW before attaching the servo.
+#     3. Add a 10kΩ pull-down resistor from GPIO25 to GND (may help, not always effective).
+# - The only way to guarantee no spinning is to use a relay or MOSFET to control servo power.
 
 Security Features:
 ----------------
@@ -77,7 +81,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 5.9
+Version: 6.0
 """
 
 import time
