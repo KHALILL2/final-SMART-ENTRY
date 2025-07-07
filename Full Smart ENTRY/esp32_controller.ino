@@ -1,81 +1,70 @@
 /*
- * Smart Gate Controller Firmware
+ * Smart Gate Controller Firmware - No Sensor Version
  * ESP32-based automated gate control system
  * 
- * Hardware Configuration:
- * - Servo motor for gate movement
- * - Solenoid lock for security
+ * This version uses time-based movement instead of position sensor feedback
+ * 
+ * Features:
+ * - Servo motor control with time-based positioning
+ * - Solenoid lock with security validation
  * - IR sensor for unauthorized access detection
- * - Position sensor for gate state detection
- * - LED indicators and buzzer for user feedback
+ * - LED indicators and audio feedback
+ * - Robust error handling and recovery
+ * - Memory-efficient design
+ * - Watchdog protection
+ * 
+ * Hardware Configuration:
+ * - Servo: GPIO25 (signal), GPIO26 (power relay)
+ * - Solenoid: GPIO27
+ * - LEDs: GPIO18 (green), GPIO19 (red)
+ * - Sensors: GPIO34 (IR) - NO POSITION SENSOR NEEDED
  * 
  * Communication Protocol:
- * Commands from host (Raspberry Pi):
- *   GATE:OPEN         - Open the gate
- *   GATE:CLOSE        - Close the gate
- *   LOCK:ACTIVATE     - Engage solenoid lock
- *   LOCK:DEACTIVATE   - Disengage solenoid lock
- *   STATUS:ALL        - Request all component status
- *   PING              - Connection test
- *   EMERGENCY:STOP    - Emergency stop all operations
- *   RESET             - Software reset
- * 
- * Responses to host:
- *   SYSTEM:READY      - System initialization complete
- *   STATUS:GATE:<state> - Current gate state
- *   STATUS:LOCK:<state> - Current lock state
- *   EVENT:UNAUTHORIZED - Unauthorized access detected
- *   EVENT:OBSTRUCTION  - Gate closing blocked
- *   ACK:<command>      - Command acknowledged
- *   NACK:<command>:<reason> - Command rejected
- *   PONG              - Response to PING
- *   ERROR:<message>    - Error condition
+ * Commands: GATE:OPEN, GATE:CLOSE, LOCK:ACTIVATE, LOCK:DEACTIVATE
+ *           STATUS:ALL, PING, EMERGENCY:STOP, RESET
  * 
  * Author: Khalil Muhammad
- * Version: 2.2
+ * Version: 2.3 (No Sensor)
  */
 
 #include <ESP32Servo.h>
-#include <Arduino.h>
-#include <driver/ledc.h>
 
 // ============================================================================
 // HARDWARE CONFIGURATION
 // ============================================================================
 
-// Pin assignments
-constexpr uint8_t PIN_SERVO_SIGNAL = 25;      // Servo control signal
-constexpr uint8_t PIN_SERVO_POWER = 26;       // Servo power relay control
-constexpr uint8_t PIN_SOLENOID = 27;          // Solenoid lock control
-constexpr uint8_t PIN_LED_GREEN = 13;         // Green LED indicator
-constexpr uint8_t PIN_LED_RED = 12;           // Red LED indicator
-constexpr uint8_t PIN_IR_SENSOR = 34;         // IR beam sensor
-constexpr uint8_t PIN_POSITION_SENSOR = 35;   // Gate position sensor
+// Pin definitions
+#define PIN_SERVO_SIGNAL     25
+#define PIN_SERVO_POWER      26
+#define PIN_SOLENOID         27
+#define PIN_LED_GREEN        18
+#define PIN_LED_RED          19
+#define PIN_IR_SENSOR        34
+// NO POSITION SENSOR - using time-based movement
 
 // Servo configuration
-constexpr uint16_t SERVO_OPEN_POSITION = 170;   // Degrees for open position
-constexpr uint16_t SERVO_CLOSED_POSITION = 10;  // Degrees for closed position
-constexpr uint16_t SERVO_MIN_PULSE = 500;       // Minimum pulse width (microseconds)
-constexpr uint16_t SERVO_MAX_PULSE = 2400;      // Maximum pulse width (microseconds)
+#define SERVO_OPEN_POSITION   170
+#define SERVO_CLOSED_POSITION 10
+#define SERVO_MIN_PULSE       500
+#define SERVO_MAX_PULSE       2400
 
 // Timing configuration
-constexpr uint32_t GATE_MOVEMENT_TIMEOUT = 8000;    // Maximum gate movement time (ms)
-constexpr uint32_t RELAY_SWITCH_DELAY = 100;        // Relay switching delay (ms)
-constexpr uint32_t SENSOR_DEBOUNCE_TIME = 50;       // Sensor debounce time (ms)
+#define GATE_MOVEMENT_TIME_MS 3000  // Time for gate to move (3 seconds)
+#define RELAY_DELAY_MS        100
+#define DEBOUNCE_MS           50
+#define FEEDBACK_DURATION_MS  2000
+#define WATCHDOG_TIMEOUT_MS   30000
 
-// Audio feedback configuration
-constexpr uint16_t BUZZER_BASE_FREQUENCY = 2000;
-
-// Serial communication
-constexpr uint32_t SERIAL_BAUD_RATE = 115200;
-constexpr uint16_t SERIAL_BUFFER_SIZE = 100;
+// Serial configuration
+#define BAUD_RATE             115200
+#define BUFFER_SIZE           64
 
 // ============================================================================
 // SYSTEM STATES
 // ============================================================================
 
-enum GateState {
-    GATE_CLOSED,
+enum GateState : uint8_t {
+    GATE_CLOSED = 0,
     GATE_OPENING,
     GATE_OPEN,
     GATE_CLOSING,
@@ -83,16 +72,16 @@ enum GateState {
     GATE_ERROR
 };
 
-enum LockState {
-    LOCK_LOCKED,
+enum LockState : uint8_t {
+    LOCK_LOCKED = 0,
     LOCK_UNLOCKED,
     LOCK_UNKNOWN
 };
 
-enum FeedbackType {
-    FEEDBACK_NONE,
-    FEEDBACK_ACCESS_GRANTED,
-    FEEDBACK_ACCESS_DENIED,
+enum FeedbackType : uint8_t {
+    FEEDBACK_NONE = 0,
+    FEEDBACK_GRANTED,
+    FEEDBACK_DENIED,
     FEEDBACK_ALARM
 };
 
@@ -101,42 +90,44 @@ enum FeedbackType {
 // ============================================================================
 
 // System state
-GateState gateState = GATE_CLOSED;
-LockState lockState = LOCK_LOCKED;
-FeedbackType activeFeedback = FEEDBACK_NONE;
+static GateState gateState = GATE_CLOSED;
+static LockState lockState = LOCK_LOCKED;
+static FeedbackType activeFeedback = FEEDBACK_NONE;
 
 // Timing variables
-uint32_t gateMovementStartTime = 0;
-uint32_t feedbackStartTime = 0;
-uint8_t feedbackStep = 0;
+static uint32_t gateStartTime = 0;
+static uint32_t feedbackStartTime = 0;
+static uint32_t lastWatchdogReset = 0;
+static uint8_t feedbackStep = 0;
 
 // Sensor state
-bool isObstructionDetected = false;
+static bool obstructionDetected = false;
+static bool lastObstructionState = false;
 
 // Serial communication
-String serialBuffer = "";
-bool commandReceived = false;
+static char cmdBuffer[BUFFER_SIZE];
+static uint8_t bufferIndex = 0;
 
 // Hardware objects
-Servo gateServo;
+static Servo gateServo;
 
 // ============================================================================
 // FUNCTION PROTOTYPES
 // ============================================================================
 
-// System initialization
+// System functions
 void initializeSystem();
 void initializeHardware();
-void initializeServo();
-void initializeAudio();
+void resetWatchdog();
+void handleWatchdog();
 
-// Command processing
+// Communication functions
 void processSerialCommands();
-void handleCommand(const String& command);
-void sendResponse(const String& response);
-void sendStatus(const String& component, const String& state);
+void handleCommand(const char* command);
+void sendResponse(const char* response);
+void sendStatus(const char* component, const char* state);
 
-// Gate control
+// Control functions
 void openGate();
 void closeGate();
 void activateLock();
@@ -148,19 +139,19 @@ void updateGateState(GateState newState);
 void updateLockState(LockState newState);
 void handleGateStateMachine();
 
-// Sensor management
+// Sensor functions
 void updateSensors();
 void checkUnauthorizedAccess();
 
-// Feedback system
+// Feedback functions
 void startFeedback(FeedbackType type);
 void handleFeedbackSystem();
 void stopAllFeedback();
 
 // Utility functions
-String gateStateToString(GateState state);
-String lockStateToString(LockState state);
-bool isGateInValidStateForOperation(GateState requiredState);
+const char* gateStateToString(GateState state);
+const char* lockStateToString(LockState state);
+bool isValidGateOperation(GateState requiredState);
 
 // ============================================================================
 // SETUP FUNCTION
@@ -168,28 +159,28 @@ bool isGateInValidStateForOperation(GateState requiredState);
 
 void setup() {
     // Initialize serial communication
-    Serial.begin(SERIAL_BAUD_RATE);
-    serialBuffer.reserve(SERIAL_BUFFER_SIZE);
+    Serial.begin(BAUD_RATE);
+    delay(500); // Allow serial to stabilize
     
-    // Initialize all hardware components
+    // Initialize system
     initializeSystem();
     
-    // Signal system readiness
-    delay(100);
+    // Signal readiness
     sendResponse("SYSTEM:READY");
+    lastWatchdogReset = millis();
 }
 
 void initializeSystem() {
     initializeHardware();
-    initializeServo();
-    initializeAudio();
     
     // Set initial states
     gateState = GATE_CLOSED;
     lockState = LOCK_LOCKED;
+    activeFeedback = FEEDBACK_NONE;
     
-    // Note: Lock will be activated only when gate is closed and secured
-    // Do not activate lock on startup to prevent unwanted power consumption
+    // Clear command buffer
+    memset(cmdBuffer, 0, BUFFER_SIZE);
+    bufferIndex = 0;
 }
 
 void initializeHardware() {
@@ -201,28 +192,18 @@ void initializeHardware() {
     
     // Configure input pins
     pinMode(PIN_IR_SENSOR, INPUT);
-    pinMode(PIN_POSITION_SENSOR, INPUT_PULLUP);
+    // NO POSITION SENSOR PIN
     
-    // Set safe initial states (all outputs OFF)
+    // Set safe initial states
     digitalWrite(PIN_SERVO_POWER, LOW);
     digitalWrite(PIN_SOLENOID, LOW);
     digitalWrite(PIN_LED_GREEN, LOW);
     digitalWrite(PIN_LED_RED, LOW);
-}
-
-void initializeServo() {
-    // Configure ESP32 PWM for servo
+    
+    // Initialize servo
     ESP32PWM::allocateTimer(0);
     gateServo.setPeriodHertz(50);
     gateServo.attach(PIN_SERVO_SIGNAL, SERVO_MIN_PULSE, SERVO_MAX_PULSE);
-    
-    // Note: Servo position will be set when needed
-    // Do not move servo on startup to prevent unwanted movement
-}
-
-void initializeAudio() {
-    // Audio feedback will be handled using tone() and noTone() functions
-    // These are more widely supported across different ESP32 core versions
 }
 
 // ============================================================================
@@ -230,17 +211,23 @@ void initializeAudio() {
 // ============================================================================
 
 void loop() {
-    // Process incoming serial commands
+    // Reset watchdog
+    resetWatchdog();
+    
+    // Process commands
     processSerialCommands();
     
-    // Update sensor readings
+    // Update sensors
     updateSensors();
     
-    // Handle gate state machine
+    // Handle state machine
     handleGateStateMachine();
     
-    // Process feedback system
+    // Handle feedback
     handleFeedbackSystem();
+    
+    // Small delay for stability
+    delay(10);
 }
 
 // ============================================================================
@@ -248,64 +235,63 @@ void loop() {
 // ============================================================================
 
 void processSerialCommands() {
-    // Read incoming serial data
     while (Serial.available()) {
-        char incomingChar = (char)Serial.read();
+        char c = Serial.read();
         
-        if (incomingChar == '\n') {
-            commandReceived = true;
-        } else {
-            serialBuffer += incomingChar;
+        if (c == '\n' || c == '\r') {
+            if (bufferIndex > 0) {
+                cmdBuffer[bufferIndex] = '\0';
+                handleCommand(cmdBuffer);
+                bufferIndex = 0;
+                memset(cmdBuffer, 0, BUFFER_SIZE);
+            }
+        } else if (bufferIndex < BUFFER_SIZE - 1) {
+            cmdBuffer[bufferIndex++] = c;
         }
-    }
-    
-    // Process complete commands
-    if (commandReceived) {
-        serialBuffer.trim();
-        handleCommand(serialBuffer);
-        serialBuffer = "";
-        commandReceived = false;
     }
 }
 
-void handleCommand(const String& command) {
-    if (command == "GATE:OPEN") {
+void handleCommand(const char* command) {
+    if (strcmp(command, "GATE:OPEN") == 0) {
         openGate();
     }
-    else if (command == "GATE:CLOSE") {
+    else if (strcmp(command, "GATE:CLOSE") == 0) {
         closeGate();
     }
-    else if (command == "LOCK:ACTIVATE") {
+    else if (strcmp(command, "LOCK:ACTIVATE") == 0) {
         activateLock();
     }
-    else if (command == "LOCK:DEACTIVATE") {
+    else if (strcmp(command, "LOCK:DEACTIVATE") == 0) {
         deactivateLock();
     }
-    else if (command == "STATUS:ALL") {
+    else if (strcmp(command, "STATUS:ALL") == 0) {
         sendStatus("GATE", gateStateToString(gateState));
         sendStatus("LOCK", lockStateToString(lockState));
     }
-    else if (command == "PING") {
+    else if (strcmp(command, "PING") == 0) {
         sendResponse("PONG");
     }
-    else if (command == "EMERGENCY:STOP") {
+    else if (strcmp(command, "EMERGENCY:STOP") == 0) {
         emergencyStop();
     }
-    else if (command == "RESET") {
+    else if (strcmp(command, "RESET") == 0) {
         ESP.restart();
     }
     else {
         sendResponse("NACK:UNKNOWN_COMMAND");
-        startFeedback(FEEDBACK_ACCESS_DENIED);
+        startFeedback(FEEDBACK_DENIED);
     }
 }
 
-void sendResponse(const String& response) {
+void sendResponse(const char* response) {
     Serial.println(response);
 }
 
-void sendStatus(const String& component, const String& state) {
-    Serial.println("STATUS:" + component + ":" + state);
+void sendStatus(const char* component, const char* state) {
+    Serial.print("STATUS:");
+    Serial.print(component);
+    Serial.print(":");
+    Serial.println(state);
 }
 
 // ============================================================================
@@ -313,53 +299,47 @@ void sendStatus(const String& component, const String& state) {
 // ============================================================================
 
 void openGate() {
-    // Validate gate state
-    if (!isGateInValidStateForOperation(GATE_CLOSED)) {
+    if (!isValidGateOperation(GATE_CLOSED)) {
         sendResponse("NACK:GATE:OPEN:NOT_CLOSED");
         return;
     }
     
-    // Check lock state
     if (lockState != LOCK_UNLOCKED) {
         sendResponse("NACK:GATE:OPEN:LOCKED");
-        startFeedback(FEEDBACK_ACCESS_DENIED);
+        startFeedback(FEEDBACK_DENIED);
         return;
     }
     
-    // Execute gate opening
     sendResponse("ACK:GATE:OPEN");
     
     digitalWrite(PIN_SERVO_POWER, HIGH);
-    delay(RELAY_SWITCH_DELAY);
+    delay(RELAY_DELAY_MS);
     
     gateServo.write(SERVO_OPEN_POSITION);
-    gateMovementStartTime = millis();
+    gateStartTime = millis();
     
     updateGateState(GATE_OPENING);
-    startFeedback(FEEDBACK_ACCESS_GRANTED);
+    startFeedback(FEEDBACK_GRANTED);
 }
 
 void closeGate() {
-    // Validate gate state
-    if (!isGateInValidStateForOperation(GATE_OPEN)) {
+    if (!isValidGateOperation(GATE_OPEN)) {
         sendResponse("NACK:GATE:CLOSE:NOT_OPEN");
         return;
     }
     
-    // Check for obstructions
-    if (isObstructionDetected) {
+    if (obstructionDetected) {
         sendResponse("NACK:GATE:CLOSE:OBSTRUCTED");
         return;
     }
     
-    // Execute gate closing
     sendResponse("ACK:GATE:CLOSE");
     
     digitalWrite(PIN_SERVO_POWER, HIGH);
-    delay(RELAY_SWITCH_DELAY);
+    delay(RELAY_DELAY_MS);
     
     gateServo.write(SERVO_CLOSED_POSITION);
-    gateMovementStartTime = millis();
+    gateStartTime = millis();
     
     updateGateState(GATE_CLOSING);
 }
@@ -386,17 +366,11 @@ void deactivateLock() {
 }
 
 void emergencyStop() {
-    // Stop all movement
     digitalWrite(PIN_SERVO_POWER, LOW);
     gateServo.write(SERVO_CLOSED_POSITION);
-    
-    // Secure the gate
     activateLock();
     
-    // Update state
     updateGateState(GATE_STOPPED);
-    
-    // Start alarm
     startFeedback(FEEDBACK_ALARM);
     
     sendResponse("ACK:EMERGENCY:STOP");
@@ -420,69 +394,33 @@ void updateLockState(LockState newState) {
 void handleGateStateMachine() {
     switch (gateState) {
         case GATE_OPENING:
-            handleOpeningState();
+            // Use time-based movement instead of position sensor
+            if (millis() - gateStartTime > GATE_MOVEMENT_TIME_MS) {
+                digitalWrite(PIN_SERVO_POWER, LOW);
+                updateGateState(GATE_OPEN);
+            }
             break;
             
         case GATE_CLOSING:
-            handleClosingState();
+            if (obstructionDetected) {
+                sendResponse("EVENT:OBSTRUCTION");
+                openGate();
+            } else if (millis() - gateStartTime > GATE_MOVEMENT_TIME_MS) {
+                // Use time-based movement instead of position sensor
+                digitalWrite(PIN_SERVO_POWER, LOW);
+                updateGateState(GATE_CLOSED);
+                activateLock();
+            }
             break;
             
         case GATE_ERROR:
-            handleErrorState();
+            digitalWrite(PIN_SERVO_POWER, LOW);
+            digitalWrite(PIN_LED_RED, HIGH);
             break;
             
-        case GATE_CLOSED:
-        case GATE_OPEN:
-        case GATE_STOPPED:
-            // Resting states - no action needed
+        default:
             break;
     }
-}
-
-void handleOpeningState() {
-    // Check if gate has reached open position
-    if (digitalRead(PIN_POSITION_SENSOR) == LOW) {
-        digitalWrite(PIN_SERVO_POWER, LOW);
-        updateGateState(GATE_OPEN);
-        return;
-    }
-    
-    // Check for movement timeout
-    if (millis() - gateMovementStartTime > GATE_MOVEMENT_TIMEOUT) {
-        sendResponse("ERROR:GATE_OPEN_TIMEOUT");
-        updateGateState(GATE_ERROR);
-    }
-}
-
-void handleClosingState() {
-    // Safety check - prevent closing if obstruction detected
-    if (isObstructionDetected) {
-        sendResponse("EVENT:OBSTRUCTION");
-        openGate(); // Re-open the gate
-        return;
-    }
-    
-    // Check if gate has reached closed position
-    if (digitalRead(PIN_POSITION_SENSOR) == HIGH) {
-        digitalWrite(PIN_SERVO_POWER, LOW);
-        updateGateState(GATE_CLOSED);
-        
-        // Automatically lock the gate
-        activateLock();
-        return;
-    }
-    
-    // Check for movement timeout
-    if (millis() - gateMovementStartTime > GATE_MOVEMENT_TIMEOUT) {
-        sendResponse("ERROR:GATE_CLOSE_TIMEOUT");
-        updateGateState(GATE_ERROR);
-    }
-}
-
-void handleErrorState() {
-    digitalWrite(PIN_SERVO_POWER, LOW);
-    digitalWrite(PIN_LED_RED, HIGH);
-    // System requires RESET command to exit error state
 }
 
 // ============================================================================
@@ -490,13 +428,21 @@ void handleErrorState() {
 // ============================================================================
 
 void updateSensors() {
-    // Update obstruction detection
-    bool previousObstruction = isObstructionDetected;
-    isObstructionDetected = (digitalRead(PIN_IR_SENSOR) == LOW);
+    bool currentObstruction = (digitalRead(PIN_IR_SENSOR) == LOW);
     
-    // Check for unauthorized access
-    if (!previousObstruction && isObstructionDetected && gateState == GATE_CLOSED) {
-        checkUnauthorizedAccess();
+    if (currentObstruction != lastObstructionState) {
+        delay(DEBOUNCE_MS);
+        currentObstruction = (digitalRead(PIN_IR_SENSOR) == LOW);
+        
+        if (currentObstruction != obstructionDetected) {
+            obstructionDetected = currentObstruction;
+            
+            if (obstructionDetected && gateState == GATE_CLOSED) {
+                checkUnauthorizedAccess();
+            }
+        }
+        
+        lastObstructionState = currentObstruction;
     }
 }
 
@@ -510,101 +456,65 @@ void checkUnauthorizedAccess() {
 // ============================================================================
 
 void startFeedback(FeedbackType type) {
-    // Stop any existing feedback
     stopAllFeedback();
     
     activeFeedback = type;
     feedbackStartTime = millis();
     feedbackStep = 0;
     
-    // Immediate feedback for alarm
     if (type == FEEDBACK_ALARM) {
         digitalWrite(PIN_LED_RED, HIGH);
-        tone(PIN_LED_RED, BUZZER_BASE_FREQUENCY * 1.5);
+        tone(PIN_LED_RED, 3000);
     }
 }
 
 void handleFeedbackSystem() {
-    if (activeFeedback == FEEDBACK_NONE) {
-        return;
-    }
+    if (activeFeedback == FEEDBACK_NONE) return;
     
-    uint32_t currentTime = millis();
-    uint32_t elapsedTime = currentTime - feedbackStartTime;
+    uint32_t elapsed = millis() - feedbackStartTime;
     
     switch (activeFeedback) {
-        case FEEDBACK_ACCESS_GRANTED:
-            handleGrantedFeedback(elapsedTime);
+        case FEEDBACK_GRANTED:
+            handleGrantedFeedback(elapsed);
             break;
-            
-        case FEEDBACK_ACCESS_DENIED:
-            handleDeniedFeedback(elapsedTime);
+        case FEEDBACK_DENIED:
+            handleDeniedFeedback(elapsed);
             break;
-            
         case FEEDBACK_ALARM:
-            handleAlarmFeedback(elapsedTime);
+            handleAlarmFeedback(elapsed);
             break;
-            
-        case FEEDBACK_NONE:
-            break;
-    }
-}
-
-void handleGrantedFeedback(uint32_t elapsedTime) {
-    switch (feedbackStep) {
-        case 0: // Start
-            digitalWrite(PIN_LED_RED, HIGH);
-            tone(PIN_LED_RED, BUZZER_BASE_FREQUENCY);
-            feedbackStep = 1;
-            break;
-            
-        case 1: // First beep off
-            if (elapsedTime > 150) {
-                noTone(PIN_LED_RED);
-                feedbackStep = 2;
-            }
-            break;
-            
-        case 2: // Second beep on
-            if (elapsedTime > 250) {
-                tone(PIN_LED_RED, BUZZER_BASE_FREQUENCY);
-                feedbackStep = 3;
-            }
-            break;
-            
-        case 3: // Second beep off
-            if (elapsedTime > 400) {
-                noTone(PIN_LED_RED);
-                feedbackStep = 4;
-            }
-            break;
-            
-        case 4: // End feedback
-            if (elapsedTime > 2000) {
-                digitalWrite(PIN_LED_RED, LOW);
-                activeFeedback = FEEDBACK_NONE;
-            }
+        default:
             break;
     }
 }
 
-void handleDeniedFeedback(uint32_t elapsedTime) {
+void handleGrantedFeedback(uint32_t elapsed) {
     switch (feedbackStep) {
-        case 0: // Start
+        case 0:
             digitalWrite(PIN_LED_GREEN, HIGH);
-            tone(PIN_LED_GREEN, BUZZER_BASE_FREQUENCY / 2);
+            tone(PIN_LED_GREEN, 2000);
             feedbackStep = 1;
             break;
-            
-        case 1: // Beep off
-            if (elapsedTime > 1000) {
+        case 1:
+            if (elapsed > 150) {
                 noTone(PIN_LED_GREEN);
                 feedbackStep = 2;
             }
             break;
-            
-        case 2: // End feedback
-            if (elapsedTime > 2000) {
+        case 2:
+            if (elapsed > 250) {
+                tone(PIN_LED_GREEN, 2000);
+                feedbackStep = 3;
+            }
+            break;
+        case 3:
+            if (elapsed > 400) {
+                noTone(PIN_LED_GREEN);
+                feedbackStep = 4;
+            }
+            break;
+        case 4:
+            if (elapsed > FEEDBACK_DURATION_MS) {
                 digitalWrite(PIN_LED_GREEN, LOW);
                 activeFeedback = FEEDBACK_NONE;
             }
@@ -612,21 +522,41 @@ void handleDeniedFeedback(uint32_t elapsedTime) {
     }
 }
 
-void handleAlarmFeedback(uint32_t elapsedTime) {
-    if (elapsedTime > 500) {
-        // Toggle LED and buzzer
+void handleDeniedFeedback(uint32_t elapsed) {
+    switch (feedbackStep) {
+        case 0:
+            digitalWrite(PIN_LED_RED, HIGH);
+            tone(PIN_LED_RED, 1000);
+            feedbackStep = 1;
+            break;
+        case 1:
+            if (elapsed > 1000) {
+                noTone(PIN_LED_RED);
+                feedbackStep = 2;
+            }
+            break;
+        case 2:
+            if (elapsed > FEEDBACK_DURATION_MS) {
+                digitalWrite(PIN_LED_RED, LOW);
+                activeFeedback = FEEDBACK_NONE;
+            }
+            break;
+    }
+}
+
+void handleAlarmFeedback(uint32_t elapsed) {
+    if (elapsed > 500) {
         bool ledState = !digitalRead(PIN_LED_RED);
         digitalWrite(PIN_LED_RED, ledState);
         
         if (ledState) {
-            tone(PIN_LED_RED, BUZZER_BASE_FREQUENCY * 1.5);
+            tone(PIN_LED_RED, 3000);
         } else {
             noTone(PIN_LED_RED);
         }
         
-        feedbackStartTime = millis(); // Reset timer for next blink
+        feedbackStartTime = millis();
     }
-    // Alarm continues until EMERGENCY:STOP is called
 }
 
 void stopAllFeedback() {
@@ -640,7 +570,7 @@ void stopAllFeedback() {
 // UTILITY FUNCTIONS
 // ============================================================================
 
-String gateStateToString(GateState state) {
+const char* gateStateToString(GateState state) {
     switch (state) {
         case GATE_CLOSED: return "CLOSED";
         case GATE_OPENING: return "OPENING";
@@ -652,7 +582,7 @@ String gateStateToString(GateState state) {
     }
 }
 
-String lockStateToString(LockState state) {
+const char* lockStateToString(LockState state) {
     switch (state) {
         case LOCK_LOCKED: return "LOCKED";
         case LOCK_UNLOCKED: return "UNLOCKED";
@@ -661,6 +591,14 @@ String lockStateToString(LockState state) {
     }
 }
 
-bool isGateInValidStateForOperation(GateState requiredState) {
+bool isValidGateOperation(GateState requiredState) {
     return gateState == requiredState;
 }
+
+void resetWatchdog() {
+    if (millis() - lastWatchdogReset > WATCHDOG_TIMEOUT_MS) {
+        sendResponse("WATCHDOG:RESET");
+        ESP.restart();
+    }
+    lastWatchdogReset = millis();
+} 
