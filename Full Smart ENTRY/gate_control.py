@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 5.5
+Version: 5.6
 """
 
 import time
@@ -1622,9 +1622,18 @@ class GateControlGUI:
                 self.open_button.config(state=tk.DISABLED)
                 self.close_button.config(state=tk.DISABLED)
             
+            # If status is unknown, periodically request status from ESP32
+            if self.esp32.gate_state == GateState.UNKNOWN:
+                logging.info("Gate status unknown, requesting STATUS:ALL from ESP32...")
+                def retry_status():
+                    for _ in range(5):
+                        self.esp32.send_command("STATUS:ALL")
+                        time.sleep(1)
+                        if self.esp32.gate_state != GateState.UNKNOWN:
+                            break
+                threading.Thread(target=retry_status, daemon=True).start()
         except Exception as e:
             logging.error(f"Error updating GUI status: {e}")
-        
         # Schedule next update
         self.root.after(1000, self.update_status)
     
