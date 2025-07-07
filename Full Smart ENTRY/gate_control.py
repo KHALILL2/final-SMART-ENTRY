@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 5.3
+Version: 5.4
 """
 
 import time
@@ -1609,6 +1609,19 @@ class GateControlGUI:
             else:
                 self.lock_status.config(text="Lock: Unknown", foreground="gray")
             
+            # Optionally, disable/enable buttons based on state
+            if self.esp32.gate_state == GateState.CLOSED:
+                self.open_button.config(state=tk.NORMAL)
+                self.close_button.config(state=tk.DISABLED)
+                self.is_moving = False
+            elif self.esp32.gate_state == GateState.OPEN:
+                self.open_button.config(state=tk.DISABLED)
+                self.close_button.config(state=tk.DISABLED)
+                self.is_moving = False
+            else:
+                self.open_button.config(state=tk.DISABLED)
+                self.close_button.config(state=tk.DISABLED)
+            
         except Exception as e:
             logging.error(f"Error updating GUI status: {e}")
         
@@ -1618,16 +1631,21 @@ class GateControlGUI:
     def open_gate(self):
         """Unlock and then open the gate."""
         logging.info("GUI: Requesting gate open sequence.")
-        # The new firmware handles the sequence. We just need to unlock, then open.
-        self.esp32.unlock_gate()
-        time.sleep(0.5) # Give the physical lock time to disengage
-        self.esp32.send_command("GATE:OPEN")
+        # Only allow open if gate is closed and not moving
+        if self.esp32.gate_state == GateState.CLOSED and not getattr(self, 'is_moving', False):
+            self.is_moving = True
+            self.esp32.unlock_gate()
+            time.sleep(0.5) # Give the physical lock time to disengage
+            self.esp32.send_command("GATE:OPEN")
+            self.open_button.config(state=tk.DISABLED)
+        else:
+            messagebox.showinfo("Gate Busy", "Gate is already open or moving.")
 
     def close_gate(self):
-        """Close the gate."""
-        logging.info("GUI: Requesting gate close.")
-        self.esp32.send_command("GATE:CLOSE")
-    
+        """Close the gate (disabled in firmware)."""
+        messagebox.showinfo("Not Supported", "Close command is disabled in this system.")
+        return
+
     def lock_gate(self):
         """Lock the gate."""
         self.esp32.lock_gate()
