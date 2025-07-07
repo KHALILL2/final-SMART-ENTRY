@@ -70,7 +70,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 5.6
+Version: 5.7
 """
 
 import time
@@ -1609,59 +1609,44 @@ class GateControlGUI:
             else:
                 self.lock_status.config(text="Lock: Unknown", foreground="gray")
             
-            # Optionally, disable/enable buttons based on state
-            if self.esp32.gate_state == GateState.CLOSED:
-                self.open_button.config(state=tk.NORMAL)
-                self.close_button.config(state=tk.DISABLED)
-                self.is_moving = False
-            elif self.esp32.gate_state == GateState.OPEN:
-                self.open_button.config(state=tk.DISABLED)
-                self.close_button.config(state=tk.DISABLED)
-                self.is_moving = False
-            else:
-                self.open_button.config(state=tk.DISABLED)
-                self.close_button.config(state=tk.DISABLED)
-            
-            # If status is unknown, periodically request status from ESP32
-            if self.esp32.gate_state == GateState.UNKNOWN:
-                logging.info("Gate status unknown, requesting STATUS:ALL from ESP32...")
-                def retry_status():
-                    for _ in range(5):
-                        self.esp32.send_command("STATUS:ALL")
-                        time.sleep(1)
-                        if self.esp32.gate_state != GateState.UNKNOWN:
-                            break
-                threading.Thread(target=retry_status, daemon=True).start()
+            # All buttons are always enabled by user request
+            self.open_button.config(state=tk.NORMAL)
+            self.close_button.config(state=tk.NORMAL)
+            self.lock_button.config(state=tk.NORMAL)
+            self.unlock_button.config(state=tk.NORMAL)
         except Exception as e:
             logging.error(f"Error updating GUI status: {e}")
         # Schedule next update
         self.root.after(1000, self.update_status)
     
     def open_gate(self):
-        """Unlock and then open the gate."""
-        logging.info("GUI: Requesting gate open sequence.")
-        # Only allow open if gate is closed and not moving
-        if self.esp32.gate_state == GateState.CLOSED and not getattr(self, 'is_moving', False):
-            self.is_moving = True
-            self.esp32.unlock_gate()
-            time.sleep(0.5) # Give the physical lock time to disengage
-            self.esp32.send_command("GATE:OPEN")
-            self.open_button.config(state=tk.DISABLED)
-        else:
-            messagebox.showinfo("Gate Busy", "Gate is already open or moving.")
+        """Send open command and show any NACK/error."""
+        self.esp32.send_command("GATE:OPEN")
+        self.check_for_nack()
 
     def close_gate(self):
-        """Close the gate (disabled in firmware)."""
-        messagebox.showinfo("Not Supported", "Close command is disabled in this system.")
-        return
+        """Send close command and show any NACK/error."""
+        self.esp32.send_command("GATE:CLOSE")
+        self.check_for_nack()
 
     def lock_gate(self):
-        """Lock the gate."""
-        self.esp32.lock_gate()
-    
+        self.esp32.send_command("LOCK:ACTIVATE")
+        self.check_for_nack()
+
     def unlock_gate(self):
-        """Unlock the gate."""
-        self.esp32.unlock_gate()
+        self.esp32.send_command("LOCK:DEACTIVATE")
+        self.check_for_nack()
+
+    def check_for_nack(self):
+        """Check for NACK or error response from ESP32 and show popup if needed."""
+        try:
+            # Check status queue for NACK
+            while not self.esp32.status_queue.empty():
+                msg = self.esp32.status_queue.get_nowait()
+                if msg.startswith("NACK"):
+                    messagebox.showwarning("Command Not Supported", msg)
+        except Exception as e:
+            logging.error(f"Error checking for NACK: {e}")
 
 class GateControlSystem:
     """
