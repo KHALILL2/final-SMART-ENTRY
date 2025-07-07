@@ -40,6 +40,13 @@ ESP32 Hardware Connections:
 * IR Sensor -> GPIO34 (Pin 6)              # Detects unauthorized access
 * Solenoid Lock -> GPIO27 (Pin 12)         # Locks gate mechanism
 
+# --- SERVO SPINNING WARNING ---
+# If you do NOT use a relay or power switch for the servo, the servo will receive power as soon as the system is powered on.
+# This may cause the servo to spin or jitter at boot until the ESP32 firmware starts and attaches the servo.
+# To minimize this effect, ensure the ESP32 firmware attaches the servo and sets it to a known position as early as possible.
+# For best results, add a 10kΩ pull-down resistor from the servo signal pin (GPIO25) to GND.
+# The only way to guarantee no spinning at boot is to use a relay or MOSFET to control servo power.
+
 Security Features:
 ----------------
 1. NFC Card Authentication
@@ -70,7 +77,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 5.8
+Version: 5.9
 """
 
 import time
