@@ -14,17 +14,32 @@
  * - Watchdog protection
  * 
  * Hardware Configuration:
- * - Servo: GPIO25 (signal), GPIO26 (power relay)
+ * - Servo: GPIO25 (signal), GPIO26 (power relay) [NOT USED]
  * - Solenoid: GPIO27
  * - LEDs: GPIO18 (green), GPIO19 (red)
  * - Sensors: GPIO34 (IR) - NO POSITION SENSOR NEEDED
  * 
  * Communication Protocol:
  * Commands: GATE:OPEN, GATE:CLOSE, LOCK:ACTIVATE, LOCK:DEACTIVATE
- *           STATUS:ALL, PING, EMERGENCY:STOP, RESET
+ *           STATUS:ALL, PING, EMERGENCY:STOP, RESET, RESET:ERROR
  * 
  * Author: Khalil Muhammad
- * Version: 2.3 (No Sensor)
+ * Version: 4.0 (No Sensor)
+ * 
+ * IMPORTANT: This firmware is for setups with NO relay and NO position sensor.
+ *
+ * IMPORTANT: For PN532 NFC reader (I2C), you MUST add pull-up resistors (4.7kΩ–10kΩ) from SDA and SCL to 3.3V for reliable operation.
+ *
+ * IMPORTANT: SERVO SPINNING AT BOOT (NO RELAY)
+ * --------------------------------------------
+ * With this wiring (servo VCC always powered, signal on GPIO25, GND shared):
+ * - The servo may spin or twitch at boot until the ESP32 firmware starts and attaches the servo.
+ * - This is a hardware limitation of most hobby servos.
+ * - To minimize this effect:
+ *     1. Attach the servo and set to a known position as early as possible in setup().
+ *     2. Set GPIO25 LOW before attaching the servo.
+ *     3. Add a 10kΩ pull-down resistor from GPIO25 to GND (may help, not always effective).
+ * - The only way to guarantee no spinning is to use a relay or MOSFET to control servo power.
  */
 
 #include <ESP32Servo.h>
@@ -43,10 +58,11 @@
 // NO POSITION SENSOR - using time-based movement
 
 // Servo configuration
-#define SERVO_OPEN_POSITION   170
-#define SERVO_CLOSED_POSITION 10
-#define SERVO_MIN_PULSE       500
-#define SERVO_MAX_PULSE       2400
+#define SERVO_OPEN_POSITION   120  // 120° (open)
+#define SERVO_CLOSED_POSITION 0    // 0° (closed)
+#define SERVO_MIN_PULSE       500  // Safe lower bound
+#define SERVO_MAX_PULSE       2600 // Increased for stronger movement (check datasheet!)
+// WARNING: Do not exceed your servo's rated pulse range! If unsure, use 500-2500
 
 // Timing configuration
 #define GATE_MOVEMENT_TIME_MS 3000  // Time for gate to move (3 seconds)
@@ -111,6 +127,12 @@ static uint8_t bufferIndex = 0;
 // Hardware objects
 static Servo gateServo;
 
+// Add a global flag
+static bool isMoving = false;
+
+// Add a global error flag
+static bool errorFlag = false;
+
 // ============================================================================
 // FUNCTION PROTOTYPES
 // ============================================================================
@@ -160,13 +182,28 @@ bool isValidGateOperation(GateState requiredState);
 void setup() {
     // Initialize serial communication
     Serial.begin(BAUD_RATE);
-    delay(500); // Allow serial to stabilize
+    // Minimize delay before servo attach
+    // (If you must delay, keep it <50ms)
+    delay(50); // Short delay for serial to stabilize
     
     // Initialize system
     initializeSystem();
     
+    // Set initial states
+    gateState = GATE_CLOSED;
+    lockState = LOCK_LOCKED;
+    
     // Signal readiness
     sendResponse("SYSTEM:READY");
+    
+    // Send initial status messages
+    sendStatus("GATE", gateStateToString(gateState));
+    Serial.print("DEBUG: Sent initial gate status: ");
+    Serial.println(gateStateToString(gateState));
+    sendStatus("LOCK", lockStateToString(lockState));
+    Serial.print("DEBUG: Sent initial lock status: ");
+    Serial.println(lockStateToString(lockState));
+    
     lastWatchdogReset = millis();
 }
 
@@ -195,15 +232,15 @@ void initializeHardware() {
     // NO POSITION SENSOR PIN
     
     // Set safe initial states
-    digitalWrite(PIN_SERVO_POWER, LOW);
+    digitalWrite(PIN_SERVO_POWER, HIGH); // Not used, but keep for compatibility
     digitalWrite(PIN_SOLENOID, LOW);
     digitalWrite(PIN_LED_GREEN, LOW);
     digitalWrite(PIN_LED_RED, LOW);
     
-    // Initialize servo
-    ESP32PWM::allocateTimer(0);
-    gateServo.setPeriodHertz(50);
-    gateServo.attach(PIN_SERVO_SIGNAL, SERVO_MIN_PULSE, SERVO_MAX_PULSE);
+    // SERVO SIGNAL PIN: Set LOW at boot, do not attach servo here
+    pinMode(PIN_SERVO_SIGNAL, OUTPUT);
+    digitalWrite(PIN_SERVO_SIGNAL, LOW); // Keep LOW until needed
+    // Do NOT attach or write to servo here
 }
 
 // ============================================================================
@@ -252,6 +289,24 @@ void processSerialCommands() {
 }
 
 void handleCommand(const char* command) {
+    Serial.print("DEBUG: handleCommand() received: ");
+    Serial.println(command);
+    if (errorFlag) {
+        if (strcmp(command, "RESET:ERROR") == 0) {
+            errorFlag = false;
+            sendResponse("ACK:ERROR_RESET");
+            Serial.println("DEBUG: Error flag cleared");
+            startFeedback(FEEDBACK_GRANTED);
+        } else if (strcmp(command, "STATUS:ALL") == 0) {
+            sendStatus("GATE", gateStateToString(gateState));
+            sendStatus("LOCK", lockStateToString(lockState));
+        } else {
+            sendResponse("NACK:ERROR_ACTIVE");
+            Serial.println("DEBUG: Command rejected due to error flag");
+            startFeedback(FEEDBACK_DENIED);
+        }
+        return;
+    }
     if (strcmp(command, "GATE:OPEN") == 0) {
         openGate();
     }
@@ -277,6 +332,12 @@ void handleCommand(const char* command) {
     else if (strcmp(command, "RESET") == 0) {
         ESP.restart();
     }
+    else if (strcmp(command, "RESET:ERROR") == 0) {
+        // Allow RESET:ERROR even if not in error state
+        if (!errorFlag) {
+            sendResponse("NACK:ERROR_NOT_ACTIVE");
+        }
+    }
     else {
         sendResponse("NACK:UNKNOWN_COMMAND");
         startFeedback(FEEDBACK_DENIED);
@@ -299,80 +360,80 @@ void sendStatus(const char* component, const char* state) {
 // ============================================================================
 
 void openGate() {
-    if (!isValidGateOperation(GATE_CLOSED)) {
-        sendResponse("NACK:GATE:OPEN:NOT_CLOSED");
-        return;
-    }
-    
-    if (lockState != LOCK_UNLOCKED) {
-        sendResponse("NACK:GATE:OPEN:LOCKED");
+    Serial.println("DEBUG: openGate() called");
+    if (isMoving) {
+        Serial.println("DEBUG: openGate() called while already moving");
+        sendResponse("NACK:GATE:OPEN:BUSY");
         startFeedback(FEEDBACK_DENIED);
         return;
     }
-    
-    sendResponse("ACK:GATE:OPEN");
-    
-    digitalWrite(PIN_SERVO_POWER, HIGH);
-    delay(RELAY_DELAY_MS);
-    
+    isMoving = true;
+    Serial.println("DEBUG: openGate() sequence started");
+    // Unlock the lock
+    Serial.println("DEBUG: Deactivating lock (should open)");
+    deactivateLock();
+    delay(300); // Small delay for lock to disengage
+    // Attach and move servo ONLY when commanded
+    Serial.println("DEBUG: Attaching servo for open movement");
+    gateServo.attach(PIN_SERVO_SIGNAL, SERVO_MIN_PULSE, SERVO_MAX_PULSE);
+    Serial.print("DEBUG: Moving servo from closed (");
+    Serial.print(SERVO_CLOSED_POSITION);
+    Serial.print(") to open (");
+    Serial.print(SERVO_OPEN_POSITION);
+    Serial.println(")");
     gateServo.write(SERVO_OPEN_POSITION);
-    gateStartTime = millis();
-    
-    updateGateState(GATE_OPENING);
+    delay(GATE_MOVEMENT_TIME_MS); // Wait for movement
+    gateServo.detach(); // Detach servo after movement (no PWM)
+    digitalWrite(PIN_SERVO_SIGNAL, LOW); // Ensure pin is LOW after detach
+    Serial.println("DEBUG: Servo detached after movement");
+    // Lock the lock again
+    Serial.println("DEBUG: Activating lock (should close)");
+    activateLock();
+    delay(300); // Small delay for lock to engage
+    // Feedback: positive
     startFeedback(FEEDBACK_GRANTED);
+    // Set state back to CLOSED so open can be used again
+    updateGateState(GATE_CLOSED);
+    sendResponse("ACK:GATE:OPEN");
+    isMoving = false;
+    Serial.println("DEBUG: openGate() sequence finished");
 }
 
 void closeGate() {
-    if (!isValidGateOperation(GATE_OPEN)) {
-        sendResponse("NACK:GATE:CLOSE:NOT_OPEN");
-        return;
-    }
-    
-    if (obstructionDetected) {
-        sendResponse("NACK:GATE:CLOSE:OBSTRUCTED");
-        return;
-    }
-    
-    sendResponse("ACK:GATE:CLOSE");
-    
-    digitalWrite(PIN_SERVO_POWER, HIGH);
-    delay(RELAY_DELAY_MS);
-    
-    gateServo.write(SERVO_CLOSED_POSITION);
-    gateStartTime = millis();
-    
-    updateGateState(GATE_CLOSING);
+    Serial.println("DEBUG: closeGate() called - function disabled");
+    // Do not unlock or move the servo, keep lock closed
+    sendResponse("NACK:GATE:CLOSE:DISABLED");
+    activateLock();
+    startFeedback(FEEDBACK_DENIED);
+    // Do not change gate state
 }
 
 void activateLock() {
-    if (gateState != GATE_CLOSED) {
-        sendResponse("NACK:LOCK:ACTIVATE:NOT_CLOSED");
-        return;
-    }
-    
-    digitalWrite(PIN_SOLENOID, HIGH);
+    Serial.println("DEBUG: activateLock() called (should close lock)");
+    digitalWrite(PIN_SOLENOID, HIGH); // Energize solenoid to lock (closed)
+    delay(200); // Allow solenoid to engage
     updateLockState(LOCK_LOCKED);
-    
     sendResponse("ACK:LOCK:ACTIVATE");
     sendStatus("LOCK", "LOCKED");
+    startFeedback(FEEDBACK_GRANTED);
 }
 
 void deactivateLock() {
-    digitalWrite(PIN_SOLENOID, LOW);
+    Serial.println("DEBUG: deactivateLock() called (should open lock)");
+    digitalWrite(PIN_SOLENOID, LOW); // De-energize solenoid to unlock (open)
+    delay(200); // Allow solenoid to disengage
     updateLockState(LOCK_UNLOCKED);
-    
     sendResponse("ACK:LOCK:DEACTIVATE");
     sendStatus("LOCK", "UNLOCKED");
+    startFeedback(FEEDBACK_GRANTED);
 }
 
 void emergencyStop() {
-    digitalWrite(PIN_SERVO_POWER, LOW);
-    gateServo.write(SERVO_CLOSED_POSITION);
+    Serial.println("DEBUG: emergencyStop() called");
+    gateServo.detach();
     activateLock();
-    
     updateGateState(GATE_STOPPED);
     startFeedback(FEEDBACK_ALARM);
-    
     sendResponse("ACK:EMERGENCY:STOP");
 }
 
@@ -381,46 +442,31 @@ void emergencyStop() {
 // ============================================================================
 
 void updateGateState(GateState newState) {
+    Serial.print("DEBUG: updateGateState() ");
+    Serial.print(gateStateToString(gateState));
+    Serial.print(" -> ");
+    Serial.println(gateStateToString(newState));
     if (gateState != newState) {
         gateState = newState;
         sendStatus("GATE", gateStateToString(newState));
+        Serial.print("DEBUG: Sent updated gate status: ");
+        Serial.println(gateStateToString(newState));
     }
 }
 
 void updateLockState(LockState newState) {
+    Serial.print("DEBUG: updateLockState() ");
+    Serial.print(lockStateToString(lockState));
+    Serial.print(" -> ");
+    Serial.println(lockStateToString(newState));
     lockState = newState;
+    sendStatus("LOCK", lockStateToString(newState));
+    Serial.print("DEBUG: Sent updated lock status: ");
+    Serial.println(lockStateToString(newState));
 }
 
 void handleGateStateMachine() {
-    switch (gateState) {
-        case GATE_OPENING:
-            // Use time-based movement instead of position sensor
-            if (millis() - gateStartTime > GATE_MOVEMENT_TIME_MS) {
-                digitalWrite(PIN_SERVO_POWER, LOW);
-                updateGateState(GATE_OPEN);
-            }
-            break;
-            
-        case GATE_CLOSING:
-            if (obstructionDetected) {
-                sendResponse("EVENT:OBSTRUCTION");
-                openGate();
-            } else if (millis() - gateStartTime > GATE_MOVEMENT_TIME_MS) {
-                // Use time-based movement instead of position sensor
-                digitalWrite(PIN_SERVO_POWER, LOW);
-                updateGateState(GATE_CLOSED);
-                activateLock();
-            }
-            break;
-            
-        case GATE_ERROR:
-            digitalWrite(PIN_SERVO_POWER, LOW);
-            digitalWrite(PIN_LED_RED, HIGH);
-            break;
-            
-        default:
-            break;
-    }
+    // No-op: all logic handled in openGate()
 }
 
 // ============================================================================
