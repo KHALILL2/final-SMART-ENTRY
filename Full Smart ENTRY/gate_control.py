@@ -81,7 +81,7 @@ Need Help?
 - Check the status panel for current system state
 
 Commit By: [Khalil Muhammad]
-Version: 6.0
+Version: 6.1
 """
 
 import time
@@ -96,7 +96,6 @@ from tkinter import ttk
 from tkinter import messagebox
 from collections import deque
 import queue
-import weakref
 import json
 import os
 from typing import Dict, List, Optional, Tuple, Set, Any, Union
@@ -107,8 +106,6 @@ import signal
 import sys
 from dataclasses import dataclass
 from enum import Enum, auto
-import mypy
-import pylint
 
 # Configure logging
 from logging.handlers import RotatingFileHandler
@@ -122,7 +119,7 @@ logging.basicConfig(
 )
 
 # Serial communication settings
-SERIAL_PORT = '/dev/serial0'  # UART port for Pi <-> ESP32 (GPIO14 TX, GPIO15 RX)
+SERIAL_PORT = '/dev/ttyS0'  # UART port for Pi <-> ESP32 (GPIO14 TX, GPIO15 RX)
 BAUD_RATE = 115200
 SERIAL_TIMEOUT = 1
 
@@ -1583,6 +1580,9 @@ class GateControlGUI:
         
         # Start status update timer
         self.update_status()
+        # Add status bar at the bottom
+        self.status_bar = ttk.Label(self.main_frame, text="Ready", relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.pack(fill=tk.X, side=tk.BOTTOM, ipady=2)
     
     def update_status(self):
         """Update the status display with current system state."""
@@ -1633,18 +1633,17 @@ class GateControlGUI:
         self.root.after(1000, self.update_status)
     
     def check_for_feedback(self):
-        """Show feedback popups/status for ACK/NACK from ESP32."""
+        """Show feedback in status bar for ACK, popup for NACK."""
         try:
             while not self.esp32.status_queue.empty():
                 msg = self.esp32.status_queue.get_nowait()
                 if msg.startswith("ACK"):
-                    # Positive feedback: green popup
-                    messagebox.showinfo("Success", msg)
-                    # Optionally, update a status label in green
+                    # Show in status bar (not popup)
+                    self.status_bar.config(text=f"Success: {msg}", foreground="green")
                 elif msg.startswith("NACK"):
                     # Negative feedback: red popup
                     messagebox.showwarning("Command Not Supported", msg)
-                    # Optionally, update a status label in red
+                    self.status_bar.config(text=f"Error: {msg}", foreground="red")
         except Exception as e:
             logging.error(f"Error checking for feedback: {e}")
     
@@ -1702,15 +1701,18 @@ class GateControlSystem:
         # Initialize card manager
         self.card_manager = CardManager()
         
-        # Initialize NFC reader
-        try:
-            i2c = busio.I2C(board.SCL, board.SDA, frequency=100000)
-            self.pn532 = PN532.PN532_I2C(i2c, debug=False)
-            self.pn532.SAM_configuration()
-            logging.info("NFC reader initialized successfully")
-        except Exception as e:
-            logging.error(f"Failed to initialize NFC reader: {e}")
-            self.pn532 = None
+        # Initialize NFC reader with retry
+        for attempt in range(3):
+            try:
+                i2c = busio.I2C(board.SCL, board.SDA, frequency=100000)
+                self.pn532 = PN532.PN532_I2C(i2c, debug=False)
+                self.pn532.SAM_configuration()
+                logging.info("NFC reader initialized successfully")
+                break
+            except Exception as e:
+                logging.error(f"Failed to initialize NFC reader (attempt {attempt+1}): {e}")
+                self.pn532 = None
+                time.sleep(1)
         
         # Initialize system state
         self.is_gate_open = False
@@ -1936,16 +1938,6 @@ class GateControlSystem:
 
 if __name__ == "__main__":
     try:
-        # Configure logging
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                RotatingFileHandler('gate_system.log', maxBytes=1024*1024, backupCount=3),
-                logging.StreamHandler()
-            ]
-        )
-        
         # Start up gate control system
         gate_system = GateControlSystem()
         
