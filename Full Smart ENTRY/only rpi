@@ -1,67 +1,70 @@
+Of course. Removing the face recognition simplifies the script significantly, turning it into a manual control system with a live camera feed. This is a great way to test the mechanical and electronic parts (servo, GUI, camera) before adding more complex logic.
+
+I have refactored the code to remove all components related to face recognition.
+
+### Summary of Changes:
+
+1.  **Removed Libraries:** I've taken out the imports for `face_recognition`, `dlib`, and `numpy`, as they are no longer needed.
+2.  **Removed `encode` Mode:** The command-line argument and function `encode_faces()` have been completely removed, as there are no faces to encode. The script now only has one mode: `run`.
+3.  **Simplified `update()` Loop:** The main `update()` method in the `SmartGateApp` class has been stripped of all face detection and recognition logic. It now simply captures a frame from the camera and displays it in the GUI.
+4.  **Removed Automatic Unlock:** Since there's no face recognition, the automatic unlock trigger has been removed. The gate can now only be operated using the "Manual Unlock" and "Manual Lock" buttons.
+5.  **Updated Comments and Docstrings:** I've updated the descriptions and comments throughout the file to reflect its new, simpler functionality.
+
+---
+
+### Revised Code (Without Face Recognition)
+
+Here is the clean, updated script. You can directly replace your old code with this.
+
+```python
 # -*- coding: utf-8 -*-
 """
 Raspberry Pi Smart Gate Control System
-Version: 2.1.0
-Author: Khalil L. (Original), AI Assistant (Refactored for Servo Control)
+Version: 3.0.0
+Author: Khalil L. (Original), AI Assistant (Refactored for Manual Control)
 
 Description:
-This script operates a complete smart gate system using a Raspberry Pi 4B.
-It features a real-time face recognition system to grant access, a graphical
-user interface (GUI) for monitoring and manual control, and direct GPIO
-integration for controlling a servo motor for the gate lock.
+This script operates a manual smart gate system using a Raspberry Pi 4B.
+It provides a graphical user interface (GUI) with a live camera feed to
+monitor the gate area and buttons for manual control of a servo motor lock.
 
-This version is specifically modified to control a servo motor directly
-without a relay.
-
-The script operates in two modes:
-1.  'encode': Scans a 'dataset' directory, detects faces in the images,
-    and saves their encodings to a file.
-2.  'run': Launches the main application, which opens the camera feed,
-    performs real-time face recognition, and controls the servo lock.
+This version is designed for direct manual operation and does not include
+any automatic features like face recognition.
 
 Setup:
 1.  Hardware:
     - Raspberry Pi 4B
     - Camera Module (connected to the Pi)
     - Servo Motor (e.g., SG90) connected to a GPIO pin.
-      - Servo VCC (Red wire) -> 5V on Pi
-      - Servo GND (Brown wire) -> GND on Pi
+      - Servo VCC (Red wire) -> 5V on Pi (or external supply)
+      - Servo GND (Brown wire) -> GND on Pi (and external supply if used)
       - Servo Signal (Orange wire) -> GPIO Pin defined in CONFIG
 
 2.  Software Dependencies:
     - gpiozero: For stable and easy servo control.
-    - opencv-python, dlib, face_recognition, numpy, pillow
+    - opencv-python: For camera access and image processing.
+    - Pillow (PIL Fork): For integrating video frames into the Tkinter GUI.
 
     Install dependencies with:
-    pip install gpiozero RPi.GPIO opencv-python dlib face_recognition numpy pillow
+    pip install gpiozero RPi.GPIO opencv-python pillow
 
 Usage:
-1.  To encode faces:
-    python3 smart_gate_system.py encode
-
-2.  To run the main application:
-    python3 smart_gate_system.py run
+    python3 smart_gate_manual.py
 """
 
 # --- Standard Library Imports ---
-import os
 import sys
-import time
-import argparse
+import tkinter as tk
+from tkinter import messagebox
 
 # --- Third-Party Imports ---
 import cv2
-import face_recognition
-import numpy as np
-### REVISED: Replaced RPi.GPIO with gpiozero for better servo control.
 from gpiozero import Servo
-import tkinter as tk
-from tkinter import messagebox
 from PIL import Image, ImageTk
 
 # --- Application Configuration ---
 CONFIG = {
-    ### REVISED: Changed hardware settings for a servo motor.
+    # --- Hardware Settings ---
     "servo_pin": 18,              # BCM GPIO pin for the servo signal wire.
     "servo_locked_angle": 0,      # Angle (0-90) for the 'locked' position.
     "servo_unlocked_angle": 90,   # Angle (0-90) for the 'unlocked' position.
@@ -69,107 +72,46 @@ CONFIG = {
     # --- Application Settings ---
     "unlock_duration_sec": 5,     # Duration (in seconds) the gate stays unlocked.
     
-    # --- File Paths ---
-    "dataset_path": "dataset",
-    "encodings_path": "encodings.npy",
-    
-    # --- Camera and Recognition Settings ---
+    # --- Camera Settings ---
     "camera_index": 0,
     "frame_width": 640,
     "frame_height": 480,
-    "detection_model": "hog",
-    "unknown_name": "Unknown"
 }
 
-def encode_faces():
-    """
-    Scans the dataset directory, encodes all found faces, and saves them.
-    (This function remains unchanged as it deals with data, not hardware)
-    """
-    print(f"[INFO] Starting face encoding process...")
-    print(f"[INFO] Scanning directory: '{CONFIG['dataset_path']}'")
-    
-    known_encodings = []
-    known_names = []
-
-    if not os.path.isdir(CONFIG['dataset_path']):
-        print(f"[ERROR] Dataset directory not found at '{CONFIG['dataset_path']}'.")
-        return
-
-    for person_name in os.listdir(CONFIG['dataset_path']):
-        person_dir = os.path.join(CONFIG['dataset_path'], person_name)
-        if not os.path.isdir(person_dir):
-            continue
-
-        for image_name in os.listdir(person_dir):
-            image_path = os.path.join(person_dir, image_name)
-            try:
-                print(f"[INFO] Processing {image_name} for '{person_name}'...")
-                image = cv2.imread(image_path)
-                rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            except Exception as e:
-                print(f"[WARNING] Could not read or process {image_path}. Skipping. Error: {e}")
-                continue
-
-            boxes = face_recognition.face_locations(rgb_image, model=CONFIG['detection_model'])
-            encodings = face_recognition.face_encodings(rgb_image, boxes)
-            
-            for encoding in encodings:
-                known_encodings.append(encoding)
-                known_names.append(person_name)
-
-    if not known_encodings:
-        print("[ERROR] No faces were found in the dataset.")
-        return
-
-    print(f"[INFO] Found and encoded {len(known_encodings)} faces.")
-    data = {"encodings": known_encodings, "names": known_names}
-    np.save(CONFIG['encodings_path'], data)
-    print(f"[SUCCESS] Face encodings saved to '{CONFIG['encodings_path']}'.")
-
-
 class SmartGateApp:
+    """
+    The main application class that manages the GUI, camera feed,
+    and GPIO control for the smart gate.
+    """
     def __init__(self, window, window_title):
+        """
+        Initializes the application, setting up the GUI, camera, and servo.
+        """
         self.window = window
         self.window.title(window_title)
         
-        self.known_face_data = {"encodings": [], "names": []}
         self.is_locked = True
         self.unlock_timer = None
 
         self._setup_gpio()
-        self._load_encodings()
         self._setup_camera()
         self._setup_gui()
+
+        # Start the main update loop
         self.update()
 
     def _setup_gpio(self):
-        """
-        ### REVISED: Sets up the servo motor using gpiozero.
-        """
+        """Sets up the servo motor using gpiozero."""
         print("[INFO] Initializing Servo on GPIO pin", CONFIG["servo_pin"])
         try:
-            # Create a Servo object.
             self.servo = Servo(CONFIG["servo_pin"])
             self.lock()  # Ensure the system starts in a locked state.
         except Exception as e:
             messagebox.showerror("GPIO/Servo Error", f"Failed to initialize servo: {e}\nIs the gpiozero library installed?")
             self.on_close()
 
-    def _load_encodings(self):
-        print("[INFO] Loading face encodings...")
-        try:
-            data = np.load(CONFIG["encodings_path"], allow_pickle=True).item()
-            self.known_face_data = data
-            print(f"[INFO] Loaded {len(self.known_face_data['encodings'])} known face encodings.")
-        except FileNotFoundError:
-            messagebox.showwarning("Encodings File Not Found", f"The file '{CONFIG['encodings_path']}' was not found.\nPlease run 'python {sys.argv[0]} encode' to create it.")
-            self.on_close()
-        except Exception as e:
-            messagebox.showerror("Loading Error", f"An error occurred loading encodings: {e}")
-            self.on_close()
-
     def _setup_camera(self):
+        """Initializes the video camera."""
         print(f"[INFO] Initializing camera at index {CONFIG['camera_index']}...")
         self.cap = cv2.VideoCapture(CONFIG["camera_index"])
         if not self.cap.isOpened():
@@ -181,16 +123,21 @@ class SmartGateApp:
         print("[INFO] Camera initialized successfully.")
 
     def _setup_gui(self):
+        """Creates and arranges the GUI elements."""
         print("[INFO] Setting up GUI...")
+        # Video canvas
         self.canvas = tk.Canvas(self.window, width=CONFIG["frame_width"], height=CONFIG["frame_height"])
         self.canvas.pack(padx=10, pady=10, side=tk.TOP, fill="both", expand=True)
 
+        # Status Label
         self.status_label = tk.Label(self.window, text="Status: Locked", font=("Arial", 16, "bold"), fg="#d9534f")
         self.status_label.pack(pady=5)
 
+        # Control Frame
         control_frame = tk.Frame(self.window)
         control_frame.pack(pady=10, fill="x", padx=10)
         
+        # Manual Unlock/Lock Buttons
         self.unlock_button = tk.Button(control_frame, text="Manual Unlock", command=self.unlock, width=15, height=2, bg="#5cb85c", fg="white")
         self.unlock_button.pack(side=tk.LEFT, expand=True, fill="x", padx=5)
 
@@ -201,9 +148,7 @@ class SmartGateApp:
         print("[INFO] GUI setup complete.")
 
     def lock(self):
-        """
-        ### REVISED: Moves the servo to the 'locked' angle and updates the GUI.
-        """
+        """Moves the servo to the 'locked' angle and updates the GUI."""
         self.servo.angle = CONFIG["servo_locked_angle"]
         self.is_locked = True
         self.status_label.config(text="Status: Locked", fg="#d9534f")
@@ -217,10 +162,8 @@ class SmartGateApp:
         self.window.after(500, self.servo.detach)
 
     def unlock(self):
-        """
-        ### REVISED: Moves the servo to the 'unlocked' angle for a fixed duration.
-        """
-        if not self.is_locked: return
+        """Moves the servo to the 'unlocked' angle for a fixed duration."""
+        if not self.is_locked: return # Prevent re-triggering unlock
         
         self.servo.angle = CONFIG["servo_unlocked_angle"]
         self.is_locked = False
@@ -229,55 +172,36 @@ class SmartGateApp:
         self.unlock_button.config(state=tk.DISABLED)
         self.lock_button.config(state=tk.NORMAL)
         
+        # Set a timer to automatically re-lock the door
         self.unlock_timer = self.window.after(duration * 1000, self.lock)
         print(f"[STATE] System UNLOCKED for {duration} seconds. Servo at angle:", CONFIG["servo_unlocked_angle"])
         # Detach the servo after a short delay
         self.window.after(500, self.servo.detach)
 
     def update(self):
+        """
+        The main loop that captures video frames and displays them in the GUI.
+        """
         ret, frame = self.cap.read()
         if not ret:
             print("[ERROR] Failed to capture frame from camera.")
-            self.window.after(1000, self.update)
+            self.window.after(1000, self.update) # Retry after 1 second
             return
 
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        face_locations = face_recognition.face_locations(rgb_frame, model=CONFIG["detection_model"])
-        face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
-
-        found_known_person = False
-        for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
-            matches = face_recognition.compare_faces(self.known_face_data["encodings"], face_encoding)
-            name = CONFIG["unknown_name"]
-            box_color = (0, 0, 255)
-
-            if True in matches:
-                face_distances = face_recognition.face_distance(self.known_face_data["encodings"], face_encoding)
-                best_match_index = np.argmin(face_distances)
-                if matches[best_match_index]:
-                    name = self.known_face_data["names"][best_match_index]
-                    box_color = (0, 255, 0)
-                    if self.is_locked:
-                        found_known_person = True
-
-            cv2.rectangle(frame, (left, top), (right, bottom), box_color, 2)
-            cv2.rectangle(frame, (left, bottom - 35), (right, bottom), box_color, cv2.FILLED)
-            cv2.putText(frame, name, (left + 6, bottom - 6), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
-
-        if found_known_person:
-            self.unlock()
-
+        # Convert the frame for display in Tkinter
         self.photo = ImageTk.PhotoImage(image=Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
         self.canvas.create_image(0, 0, image=self.photo, anchor=tk.NW)
+
+        # Schedule the next update
         self.window.after(15, self.update)
 
     def on_close(self):
+        """Performs cleanup operations when the application window is closed."""
         print("[INFO] Closing application and cleaning up resources...")
         if self.unlock_timer:
             self.window.after_cancel(self.unlock_timer)
         if hasattr(self, 'cap') and self.cap.isOpened():
             self.cap.release()
-        ### REVISED: Close the servo object properly.
         if hasattr(self, 'servo'):
             self.servo.close()
         self.window.destroy()
@@ -285,24 +209,15 @@ class SmartGateApp:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Raspberry Pi Smart Gate System.")
-    subparsers = parser.add_subparsers(dest="command", required=True, help="Available commands")
-    encode_parser = subparsers.add_parser("encode", help="Scan the dataset folder to create face encodings.")
-    run_parser = subparsers.add_parser("run", help="Run the main Smart Gate GUI application.")
-    args = parser.parse_args()
-
-    if args.command == "encode":
-        encode_faces()
-    elif args.command == "run":
-        app = None
-        try:
-            root = tk.Tk()
-            app = SmartGateApp(root, "Smart Gate Control System")
-            root.mainloop()
-        except Exception as e:
-            print(f"[CRITICAL] An unexpected error occurred: {e}")
-        finally:
-            ### REVISED: Ensure cleanup happens even on a crash.
-            # The on_close method handles this, but an extra check is safe.
-            if app and hasattr(app, 'servo'):
-                app.servo.close()
+    app = None
+    try:
+        root = tk.Tk()
+        app = SmartGateApp(root, "Smart Gate Control System")
+        root.mainloop()
+    except Exception as e:
+        print(f"[CRITICAL] An unexpected error occurred: {e}")
+    finally:
+        # Ensure cleanup happens even if the app crashes
+        if app and hasattr(app, 'servo'):
+            app.servo.close()
+```
