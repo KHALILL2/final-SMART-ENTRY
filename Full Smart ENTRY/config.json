@@ -1,0 +1,6 @@
+{
+    "servo_pin": 18,
+    "servo_locked_angle": 0,
+    "servo_unlocked_angle": 90,
+    "unlock_duration_sec": 5
+}
